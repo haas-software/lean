@@ -9,7 +9,9 @@ use core::time::Duration;
 
 use crate::lease::Lease;
 use crate::time::Instant;
-use crate::wire::{self, Confirm, FRAME_LEN, MSG_ACK, MSG_DISCOVER, MSG_OFFER, MSG_REQUEST};
+use crate::wire::{
+    self, Confirm, FRAME_LEN, MSG_ACK, MSG_DISCOVER, MSG_NAK, MSG_OFFER, MSG_REQUEST,
+};
 use crate::{Error, Result};
 
 /// Hoe lang één wachtfase van een DORA-ronde hoogstens duurt.
@@ -54,8 +56,10 @@ pub enum Action<'a> {
     /// client weten of er nog iets in de ring staat voordat hij de ronde
     /// sluit. Poll na elk toegevoerd frame, zoals de Go-lus deed.
     Wait(Instant),
-    /// Klaar: dit is de lease. Verdere polls geven hem opnieuw.
-    Bound(Lease),
+    /// Klaar: dit is de lease, met het tijdstip waarop het REQUEST uitging.
+    /// Daar begint de lease (RFC 2131 §4.4.1), niet bij de ACK: geef het aan
+    /// [`crate::Keeper::new`]. Verdere polls geven hetzelfde opnieuw.
+    Bound(Lease, Instant),
 }
 
 /// Waar een ronde staat.
@@ -65,10 +69,12 @@ enum Phase {
     Start,
     /// Het REQUEST staat klaar in de zendbuffer en gaat bij de volgende poll.
     Request,
+    /// Het REQUEST ging uit op dit tijdstip; wachten op de ACK.
+    Requested(Await, Instant),
     /// Wachten op een antwoord van één type.
     Await(Await),
-    /// Een ACK is binnen.
-    Bound(Lease),
+    /// Een ACK is binnen op het REQUEST van dit tijdstip.
+    Bound(Lease, Instant),
     /// Mislukt; blijvend.
     Failed(Error),
 }
@@ -146,10 +152,10 @@ impl Client {
                     return Ok(Action::Transmit(&self.frame));
                 }
                 Phase::Request => {
-                    self.phase = Phase::Await(self.await_for(MSG_ACK, now, ACK_GRACE));
+                    self.phase = Phase::Requested(self.await_for(MSG_ACK, now, ACK_GRACE), now);
                     return Ok(Action::Transmit(&self.frame));
                 }
-                Phase::Await(ref mut a) => {
+                Phase::Await(ref mut a) | Phase::Requested(ref mut a, _) => {
                     // De tijd telt pas als de ring leeg was: een antwoord dat al
                     // klaarstond blijft geldig, ook als het venster net sloot.
                     if now < a.window || (a.fed && !a.closed) {
@@ -158,7 +164,7 @@ impl Client {
                     }
                     self.phase = Phase::Start;
                 }
-                Phase::Bound(lease) => return Ok(Action::Bound(lease)),
+                Phase::Bound(lease, since) => return Ok(Action::Bound(lease, since)),
                 Phase::Failed(err) => return Err(err),
             }
         }
@@ -169,8 +175,10 @@ impl Client {
     /// Alles wat geen antwoord op de lopende ronde is (ander MAC, andere xid,
     /// ander type, rommel), wordt genegeerd. Na elk frame hoort een poll.
     pub fn receive(&mut self, frame: &[u8], now: Instant) {
-        let Phase::Await(ref mut a) = self.phase else {
-            return;
+        let (a, sent) = match self.phase {
+            Phase::Await(ref mut a) => (a, None),
+            Phase::Requested(ref mut a, sent) => (a, Some(sent)),
+            _ => return,
         };
         if frame.is_empty() || a.closed {
             return;
@@ -178,9 +186,12 @@ impl Client {
         a.fed = true;
         let expect = a.expect;
         let window = a.window;
-        match wire::parse_frame(frame, &self.mac, self.xid) {
-            Some((t, lease)) if t == expect && expect == MSG_OFFER => self.request(lease),
-            Some((t, lease)) if t == expect => self.phase = Phase::Bound(lease),
+        match (wire::parse_frame(frame, &self.mac, self.xid), sent) {
+            (Some((t, lease)), None) if t == expect => self.request(lease),
+            (Some((t, lease)), Some(sent)) if t == expect => self.phase = Phase::Bound(lease, sent),
+            // Een NAK op ons REQUEST: meteen een nieuwe ronde, niet wachten tot
+            // het venster dicht is (RFC 2131 §4.4.1; F14).
+            (Some((MSG_NAK, _)), Some(_)) => self.phase = Phase::Start,
             _ if now >= window => {
                 if a.grace == 0 {
                     a.closed = true;
@@ -204,7 +215,7 @@ impl Client {
     ///
     /// Een lease die al binnen is, blijft staan.
     pub fn transmit_failed(&mut self) {
-        if !matches!(self.phase, Phase::Bound(_)) {
+        if !matches!(self.phase, Phase::Bound(..)) {
             self.phase = Phase::Failed(Error::Transmit);
         }
     }
@@ -329,7 +340,7 @@ mod tests {
                         }
                     }
                 }
-                Ok(Action::Bound(l)) => return (Ok(l), nic.now.saturating_duration_since(T0)),
+                Ok(Action::Bound(l, _)) => return (Ok(l), nic.now.saturating_duration_since(T0)),
                 Err(e) => return (Err(e), nic.now.saturating_duration_since(T0)),
             }
         }
@@ -501,8 +512,44 @@ mod tests {
         let later = laat + Duration::from_secs(3600);
         c.receive(&reply(&r, MSG_ACK, [10, 1, 2, 3], LESSOR), later);
         match c.poll(later) {
-            Ok(Action::Bound(l)) => assert_eq!(l.ip, Ipv4Addr::new(10, 1, 2, 3)),
+            Ok(Action::Bound(l, _)) => assert_eq!(l.ip, Ipv4Addr::new(10, 1, 2, 3)),
             other => panic!("await negeerde een ACK dat al in de ring lag: {other:?}"),
+        }
+    }
+
+    /// F13: Bound draagt het tijdstip van het REQUEST, niet dat van de ACK.
+    /// F14: een NAK op het REQUEST start meteen een nieuwe ronde.
+    #[test]
+    fn bound_draagt_het_request_en_een_nak_herstart_meteen() {
+        let mut c = Client::new(MAC, T0, Duration::from_secs(60));
+        let Ok(Action::Transmit(d)) = c.poll(T0) else {
+            panic!("geen DISCOVER");
+        };
+        let d = d.to_vec();
+        let t1 = T0 + Duration::from_millis(10);
+        c.receive(&reply(&d, MSG_OFFER, [10, 1, 2, 3], LESSOR), t1);
+        let Ok(Action::Transmit(r)) = c.poll(t1) else {
+            panic!("geen REQUEST");
+        };
+        let r = r.to_vec();
+        // Een NAK: de volgende poll is meteen een nieuwe DISCOVER.
+        c.receive(&reply(&r, MSG_NAK, [10, 1, 2, 3], LESSOR), t1);
+        let Ok(Action::Transmit(d2)) = c.poll(t1) else {
+            panic!("de NAK werd genegeerd tot het venster dicht was");
+        };
+        assert_eq!(msg_type_of(d2), MSG_DISCOVER);
+        let d2 = d2.to_vec();
+        let t2 = t1 + Duration::from_millis(10);
+        c.receive(&reply(&d2, MSG_OFFER, [10, 1, 2, 3], LESSOR), t2);
+        let Ok(Action::Transmit(r2)) = c.poll(t2) else {
+            panic!("geen tweede REQUEST");
+        };
+        let r2 = r2.to_vec();
+        let ack_at = t2 + Duration::from_secs(2);
+        c.receive(&reply(&r2, MSG_ACK, [10, 1, 2, 3], LESSOR), ack_at);
+        match c.poll(ack_at) {
+            Ok(Action::Bound(_, since)) => assert_eq!(since, t2),
+            other => panic!("geen lease: {other:?}"),
         }
     }
 

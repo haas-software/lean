@@ -33,7 +33,7 @@
 //!     match client.poll(now) {
 //!         Ok(Action::Transmit(frame)) => assert_eq!(frame.len(), 342), // nic.transmit(frame)
 //!         Ok(Action::Wait(until)) => now = until, // Voer frames toe met client.receive.
-//!         Ok(Action::Bound(lease)) => panic!("lease uit het niets: {}", lease.cidr()),
+//!         Ok(Action::Bound(lease, _)) => panic!("lease uit het niets: {}", lease.cidr()),
 //!         Err(err) => break err,
 //!     }
 //! };

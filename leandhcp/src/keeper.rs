@@ -145,6 +145,8 @@ enum Phase {
     Waiting {
         state: State,
         sched: Schedule,
+        /// Wanneer het REQUEST uitging: daar begint een verlengde lease.
+        sent: Instant,
         until: Instant,
     },
     /// Tussen twee pogingen.
@@ -174,18 +176,22 @@ pub struct Keeper {
 }
 
 impl Keeper {
-    /// Een keeper voor `lease`, die op `now` met een ACK binnenkwam.
+    /// Een keeper voor `lease`, waarvan het REQUEST op `since` uitging (de
+    /// tweede waarde van [`crate::Action::Bound`]).
     ///
-    /// De timers lopen vanaf `now`. Een oneindige of onbekende lease geeft een
-    /// keeper die meteen [`KeepAction::Done`] zegt.
-    pub fn new(mac: [u8; 6], lease: Lease, now: Instant) -> Self {
+    /// De timers lopen vanaf `since`, zoals RFC 2131 §4.4.1 vraagt: niet
+    /// vanaf de ACK en niet vanaf het moment dat de eigenaar de keeper maakt,
+    /// anders denkt de node de lease langer te hebben dan de server (F13).
+    /// Een oneindige of onbekende lease geeft een keeper die meteen
+    /// [`KeepAction::Done`] zegt.
+    pub fn new(mac: [u8; 6], lease: Lease, since: Instant) -> Self {
         Self {
             mac,
             lease,
             attempts: 0,
             xid: 0,
             event: None,
-            phase: bind(&lease, now),
+            phase: bind(&lease, since),
             payload: [0; BOOTP_LEN],
         }
     }
@@ -230,6 +236,7 @@ impl Keeper {
                     state,
                     sched,
                     until,
+                    ..
                 } => {
                     if now < until {
                         return Ok(KeepAction::Wait(until));
@@ -261,16 +268,18 @@ impl Keeper {
     /// Voert één UDP-payload toe die op poort 68 binnenkwam.
     ///
     /// Alleen een ACK of NAK op de lopende poging telt; ander of laat verkeer
-    /// op poort 68 wordt genegeerd. Na elke payload hoort een poll.
-    pub fn receive(&mut self, payload: &[u8], now: Instant) {
-        let Phase::Waiting { state, .. } = self.phase else {
+    /// op poort 68 wordt genegeerd. Na elke payload hoort een poll. `_now`
+    /// houdt de vorm: een verlengde lease telt vanaf het REQUEST, niet vanaf
+    /// de ACK.
+    pub fn receive(&mut self, payload: &[u8], _now: Instant) {
+        let Phase::Waiting { state, sent, .. } = self.phase else {
             return;
         };
         let Some((msg_type, fresh)) = wire::parse_bootp(payload, &self.mac, self.xid) else {
             return;
         };
         match msg_type {
-            MSG_ACK => self.acked(state, fresh, now),
+            MSG_ACK => self.acked(state, fresh, sent),
             MSG_NAK => {
                 // Het adres is niet meer van ons: opnieuw proberen zou actief
                 // fout zijn.
@@ -317,6 +326,7 @@ impl Keeper {
         self.phase = Phase::Waiting {
             state,
             sched,
+            sent: now,
             until: now + REQUEST_TIMEOUT,
         };
         KeepAction::Send {
@@ -326,8 +336,8 @@ impl Keeper {
     }
 
     /// Een ACK: samenvoegen, controleren dat het adres hetzelfde bleef, en
-    /// opnieuw binden vanaf nu.
-    fn acked(&mut self, state: State, fresh: Lease, now: Instant) {
+    /// opnieuw binden vanaf het REQUEST (`sent`).
+    fn acked(&mut self, state: State, fresh: Lease, sent: Instant) {
         let fresh = self.lease.merge(fresh);
         if fresh.ip != self.lease.ip {
             // Bij rebinden kan een andere server een ander adres geven. De
@@ -342,7 +352,7 @@ impl Keeper {
             state,
             lease: fresh,
         });
-        self.phase = bind(&fresh, now);
+        self.phase = bind(&fresh, sent);
     }
 
     /// Een poging mislukte: wacht de helft van de resterende tijd, stap op T2
@@ -368,8 +378,8 @@ impl Keeper {
     }
 }
 
-/// De fase na een ACK op `now`: gebonden tot T1, of klaar als er niets te
-/// plannen is.
+/// De fase na een ACK op het REQUEST van `now`: gebonden tot T1, of klaar
+/// als er niets te plannen is.
 fn bind(lease: &Lease, now: Instant) -> Phase {
     match lease.timers() {
         Some(t) => Phase::Bound(Schedule {
@@ -605,6 +615,35 @@ mod tests {
             p.slept
         );
         assert_eq!(p.end, Some(Ok(())));
+    }
+
+    /// F13: een verlengde lease telt vanaf het REQUEST, niet vanaf de ACK.
+    #[test]
+    fn verlenging_telt_vanaf_het_request() {
+        let mut k = Keeper::new(MAC, bound(), T0);
+        let t1 = T0 + Duration::from_secs(1800);
+        assert!(matches!(k.poll(T0), Ok(KeepAction::Wait(at)) if at == t1));
+        let Ok(KeepAction::Send { payload, .. }) = k.poll(t1) else {
+            panic!("geen REQUEST op T1");
+        };
+        let req = payload.to_vec();
+        // De ACK komt vijf seconden later; de nieuwe T1 rekent vanaf t1.
+        let laat = t1 + Duration::from_secs(5);
+        for a in ack(&req, IP, &[]) {
+            k.receive(&a, laat);
+        }
+        let mut next = None;
+        for _ in 0..4 {
+            match k.poll(laat) {
+                Ok(KeepAction::Wait(at)) => {
+                    next = Some(at);
+                    break;
+                }
+                Ok(KeepAction::Event(_)) => {}
+                other => panic!("{other:?}"),
+            }
+        }
+        assert_eq!(next, Some(t1 + Duration::from_secs(1800)));
     }
 
     #[test]
