@@ -37,10 +37,6 @@ pub struct WebDial<D, N, R> {
     entropy: R,
     /// De termijn op het transport tijdens de handshake; daarna geen.
     pub handshake: Duration,
-    /// Het ALPN-aanbod (RFC 7301) voor `https://`, standaard leeg: geen
-    /// aanbod. De keuze staat in [`Link::alpn`]. leanhttp spreekt alleen
-    /// HTTP/1.1; `h2` is voor wie zelf dialt en een HTTP/2-client gebruikt.
-    pub alpn: &'static [&'static [u8]],
     last_error: Option<Error>,
 }
 
@@ -59,7 +55,6 @@ where
             unix_seconds,
             entropy,
             handshake: Duration::from_secs(20),
-            alpn: &[],
             last_error: None,
         }
     }
@@ -110,7 +105,7 @@ where
         raw.set_write_timeout(Some(self.handshake))?;
         // Het publieke web krijgt alleen TLS 1.3; de terugval naar 1.2 is
         // voor een eigen netwerk met een eigen CA (TlsDial::with_tls12).
-        let options = Options::new().alpn(self.alpn);
+        let options = Options::new();
         let mut conn = match wrap(raw, &Trust::Chain(&verifier), host, entropy, &options).await {
             Ok(conn) => conn,
             Err((mine, theirs)) => {
@@ -126,16 +121,6 @@ where
 
     fn is_encrypted(&self) -> bool {
         true
-    }
-}
-
-impl<C> Link<C> {
-    /// Het protocol dat ALPN opleverde; `None` voor `http://` en zonder keuze.
-    pub fn alpn(&self) -> Option<&[u8]> {
-        match self {
-            Self::Plain(_) => None,
-            Self::Tls(c) => c.alpn(),
-        }
     }
 }
 

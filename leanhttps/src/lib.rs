@@ -66,7 +66,7 @@ use leantls::{ClientIdentity, ConnError, Entropy, Options, Trust};
 /// Hoe lang een close_notify mag duren voordat het transport toch dichtgaat.
 /// Een peer die niet meer leest, mag het sluiten niet gijzelen; de Go-versie
 /// koos 250 ms en KAM.md legt die grens vast.
-pub const CLOSE_NOTIFY_TIMEOUT: Duration = Duration::from_millis(250);
+pub(crate) const CLOSE_NOTIFY_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// De resultaat-alias van deze crate.
 pub type Result<T = (), E = Error> = core::result::Result<T, E>;
@@ -151,15 +151,6 @@ where
             server_name: None,
             last_error: None,
         }
-    }
-
-    /// Biedt bij elke handshake `protocols` aan via ALPN (RFC 7301); wat de
-    /// server koos, staat in [`TlsConn::alpn`]. leanhttp spreekt alleen
-    /// HTTP/1.1: wie zelf `h2` aanbiedt, dialt zelf en geeft de verbinding
-    /// aan een HTTP/2-client zoals `leanh2::client`.
-    pub fn with_alpn(mut self, protocols: &'t [&'t [u8]]) -> Self {
-        self.options = self.options.alpn(protocols);
-        self
     }
 
     /// Bewijst elke verbinding met `identity` als de server om een
@@ -262,7 +253,7 @@ struct Pending {
 /// zijn transport (`get_ref`). Daarom staat de wijziging in een `Cell` die hier
 /// bij de volgende operatie wordt toegepast. Eén taak bezit de verbinding;
 /// de `Cell` is alleen de brievenbus tussen twee lagen van die ene eigenaar.
-pub struct Wire<C> {
+pub(crate) struct Wire<C> {
     /// De kale verbinding.
     conn: C,
     /// Termijnen die nog moeten ingaan.
@@ -331,17 +322,6 @@ pub struct TlsConn<C> {
     state: State<C>,
 }
 
-impl<C> TlsConn<C> {
-    /// Het protocol dat ALPN opleverde, zoals `b"h2"`; `None` zonder aanbod,
-    /// zonder keuze van de server, of na het sluiten.
-    pub fn alpn(&self) -> Option<&[u8]> {
-        match &self.state {
-            State::Open(tls) => tls.alpn(),
-            _ => None,
-        }
-    }
-}
-
 impl<C: leanhttp::Conn + Unpin> leanhttp::AsyncRead for TlsConn<C> {
     fn poll_read(
         &mut self,
@@ -400,7 +380,7 @@ impl<C: leanhttp::Conn + Unpin> leanhttp::AsyncWrite for TlsConn<C> {
 }
 
 impl<C: leanhttp::Conn + Unpin> Close for TlsConn<C> {
-    /// Stuurt een close_notify binnen [`CLOSE_NOTIFY_TIMEOUT`] en sluit daarna
+    /// Stuurt een close_notify binnen 250 ms (`CLOSE_NOTIFY_TIMEOUT`) en sluit daarna
     /// altijd het transport. Mislukt de close_notify, dan gaat het transport
     /// toch dicht; een schrijffout vóór het sluiten was al terminaal.
     fn poll_close(&mut self, cx: &mut Context<'_>) -> Poll<core::result::Result<(), IoError>> {

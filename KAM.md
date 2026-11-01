@@ -81,7 +81,7 @@ caller that has a choice uses `leanhttp`.
 | HTTP server | HTTP/1.1, sequential keep-alive, fixed and streamed responses, `HEAD`, `204`/`205`/`304`, `claim_done`, `reader_gone`, `stream`, `hijack` | origin-form only, request bodies with `Content-Length` or exactly `Transfer-Encoding: chunked`, WebSocket through raw takeover | HTTP/1.0, HTTP/2 in this crate (it lives in `leanh2`), CONNECT, chunk extensions and trailer semantics in requests, server-side Expect state machine, general 1xx state machine |
 | Mux | method+path, exact/subtree, `{segment}`, `{rest...}`, `GET`→`HEAD`, `404`/`405`+`Allow` | canonical paths or rejection; registration fails with `Err` | host routing, `{$}`, escaped/dot routing, slash normalization |
 | HTTP client | outbound HTTP/1.1, inbound 1.0/1.1, GET/HEAD redirects, response framing, header deadline, keep-alive pool keyed by scheme, host and port | fixed-length streaming upload with a strict Expect decision; compression pass-through | request chunking, automatic decompression, CONNECT/upgrade, general retry state machine |
-| leanhttps | TLS as a dialer composition (`TlsDial`, `WebDial`); SNI per connection; client certificate, fixed TLS name and ALPN passed through | TLS 1.2 only through `TlsDial::with_tls12` (feature `tls12`); `WebDial` stays TLS 1.3 | a server side, any HTTP or TLS protocol of its own |
+| leanhttps | TLS as a dialer composition (`TlsDial`, `WebDial`); SNI per connection; client certificate and fixed TLS name passed through | TLS 1.2 only through `TlsDial::with_tls12` (feature `tls12`); `WebDial` stays TLS 1.3 | a server side, any HTTP or TLS protocol of its own |
 | S3 | SigV4 and the used object operations (GET, GET to a sink, PUT, PUT from a source, HEAD, conditional PUT/DELETE, paginated LIST); one attempt per request in `leans3http` | signed calls never follow redirects; a streamed upload under a progress deadline | multipart, streaming SigV4, SigV4a, presigned URLs, IMDS/IAM, any retry inside lean |
 | leanh2 | HTTP/2 server role on a caller-supplied connection: the client preface then SETTINGS first; 32 streams; 16 KiB frames; 64 KiB compressed and decoded headers; 64 KiB receive window per stream; atomic two-level flow control; statuses 200–599. Client: one request on stream 1 of a caller-supplied connection, bounded response | request bodies with exact Content-Length integrity; exact static HPACK matches use their index, otherwise fields are literals without indexing; syntactically valid PRIORITY accepted and ignored; a stream without a free slot gets `REFUSED_STREAM`; a client request body must fit the server's initial window | an outgoing `GOAWAY` from the server role, client pooling or more than one request per connection, listener/dialer, TLS/ALPN in this crate, `h2c` upgrade, protocol sniffing, push, CONNECT, trailing header sections with meaning, 1xx from the server role, priority state or scheduling, dynamic header compression |
 
@@ -598,10 +598,10 @@ failing step in `last_error`.
   redirect to another host verifies the right name; `TlsDial::with_server_name`
   is the one exception, for a node behind a forwarder whose certificate names
   another host (Meet, the RavenDB bridges, 2026-10-07);
-- `TlsDial::with_identity` passes a client certificate, `with_alpn` an ALPN
-  offer (empty by default; `leanhttp` speaks only HTTP/1.1, so `h2` is for a
-  caller that dials and hands the connection to `leanh2::client`), and
-  `with_tls12` (feature `tls12`) the TLS 1.2 fallback;
+- `TlsDial::with_identity` passes a client certificate and `with_tls12`
+  (feature `tls12`) the TLS 1.2 fallback; there is no ALPN here: `leanhttp`
+  speaks only HTTP/1.1, so a caller that wants `h2` dials with `leantls`
+  (`Options::alpn`) and hands the connection to `leanh2::client`;
 - a chain with a bare IP address fails as `ChainWithoutName`.
 
 TLS shutdown is best effort: closing attempts `close_notify`, bounds that
