@@ -103,7 +103,7 @@ IPv4 multicast MUST:
 
 - accept joins for 224.0.0.0/24 only (RFC 5771 link-local — the block routers
   never forward), idempotent, capped (`MAX_GROUPS`), for the stack's lifetime
-  (no leave: the only consumer never leaves), released on close;
+  (no leave: the only consumer never leaves), released when the stack drops;
 - deliver a joined group's UDP datagrams and ignore other multicast silently
   — normal LAN noise, not a drop statistic;
 - map groups per RFC 1112 §6.4 (01:00:5e plus the low 23 bits), never ARP and
@@ -166,7 +166,7 @@ The IPv6 lane MUST:
   or SLAAC address is the only supported local loopback destination;
 - fail immediately when no usable source or route exists, fail after bounded
   NDP resolution when a neighbor is unreachable, and wake blocked operations
-  on resolution, failure, or close;
+  on resolution or failure;
 - accept only unicast frames addressed to this interface's MAC and multicast
   frames addressed to the exact `33:33` mapping of an implicit or joined IPv6
   group.

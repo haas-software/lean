@@ -1786,3 +1786,33 @@ Niet in deze ronde gedaan (lean pint geen consumenten); per gebruiker:
 - **Stulp**, **Replica**: geen wijziging nodig voor deze commits, behalve de
   pin.
 
+
+### 14.7 Uitgevoerd (01-11, met Dereks ja)
+
+De lijst is opnieuw gezocht in de zes gebruikers (hop-os samen, hop
+hop-besluiten, Stulp, Spin, Meet, Replica) en daarna uitgevoerd, per crate
+één commit. Wat anders uitviel dan de lijst hierboven:
+
+- **Mee weg, omdat alleen het weggehaalde ze bereikte:** in leanelf het
+  hele `.symtab`-lezen (de kern leest zelf), `NotLoaded`, `TableTooBig`,
+  `MAX_TABLE` en vier `Part`-varianten; in leandhcp `rx_errors` (ook het
+  veld van `Error::NoLease`); in leancookie de teller `rejected`; in
+  leannet het veld `closed` en zijn toetsen in veertien calls; in leanh2
+  het weggooien na `Body::close` en `Error::BodyClosed`; in leantls
+  `Error::PeerKeySize`, het veld `peer_key` en `Roots::is_empty`; in
+  leanhttps ook het veld `WebDial::alpn`.
+- **Blijft publiek, anders dan §14.4:** typen die in een publieke
+  handtekening staan of die een gebruiker noemt: leandhcp `State`,
+  leannet `ArpStats` en `NdpStats`, leanhttp `Pool`, `Hijacked` en
+  `PatternError`, leantls `CertChain`, `CertIter` (Stulp implementeert
+  `VerifyPeer`), `X509Error` en `x509::MAX_ROOTS` (Stulp), leans3 `Op`,
+  `XmlError` en `MAX_BUFFERED_GET` (een docregel in Hop), leanh2
+  `HpackError` en `RequestError`.
+- **Open voor Derek:** `Stack::ndp_stats` heeft geen gebruiker, maar zonder
+  hem zijn de NDP-tellers onleesbaar; `leanhttp::Header::is_empty` en de
+  publieke velden van `Pool` zijn niet nagelopen.
+- **De GOAWAY van de client blijft** (Stulp, APNs; RFC 9113 §6.8).
+
+Daarbij, ook met Dereks ja: ARP en NDP vragen een buur 3 keer (Linux
+`mcast_solicit`), de `now`-parameters die niets deden zijn weg, en de reden
+voor de vaste DHCP-rondes staat kort bij `ROUND_WINDOW`.

@@ -15,10 +15,10 @@ applications share.
 
 | | |
 |---|---|
-| `leanrand` | Random for a node: bytes, an id, a bounded number, jitter on a wait. |
+| `leanrand` | Random for a node: jitter on a wait, from a `Source` the caller owns. |
 | `leancrypto` | The shared primitives: SHA-1 (protocols only), SHA-256/384/512, HMAC-SHA256 and HKDF, table-free AES-128 and AES-128-GCM, constant-time compare and wipe. |
 | `leanbase64` | Base64 (RFC 4648): the standard alphabet with padding and the URL alphabet without, decoded strictly. |
-| `leanelf` | ELF64 for a loader: PT_LOAD segments, bytes at a load address, symbols by name. |
+| `leanelf` | ELF64 for a loader: the header and the PT_LOAD segments; the symbol type and errors for a caller that reads `.symtab` itself. |
 | `leandhcp` | DHCPv4 on raw ethernet frames: a lease before any netstack exists. |
 | `leannet` | TCP/IP for bare metal: Ethernet, IPv4 ARP/ICMP/UDP/TCP; IPv6 UDP/NDP/SLAAC and Thread routes behind the feature `ipv6`, one bounded buffer budget. |
 | `leancookie` | A cookie jar (RFC 6265), host-only by default. |
