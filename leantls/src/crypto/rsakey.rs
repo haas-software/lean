@@ -277,7 +277,7 @@ impl RsaKey {
     /// Hetzelfde zout geeft dezelfde handtekening; TLS geeft daarom per
     /// handtekening vers zout uit [`crate::Entropy`]. De handtekening wordt
     /// voor het teruggeven met de publieke sleutel gecontroleerd.
-    pub fn sign_pss_sha256(&self, message: &[u8], salt: &[u8; 32]) -> Result<Vec<u8>> {
+    pub(crate) fn sign_pss_sha256(&self, message: &[u8], salt: &[u8; 32]) -> Result<Vec<u8>> {
         let k = self.public.len();
         let digest = HashAlg::Sha256.digest(&[message]);
         let mut em = [0u8; MAX_BYTES];
@@ -313,7 +313,7 @@ impl RsaKey {
     /// assert_eq!(a.len(), 256);
     /// ```
     #[cfg(feature = "tls12")]
-    pub fn sign_pkcs1_sha256(&self, message: &[u8]) -> Result<Vec<u8>> {
+    pub(crate) fn sign_pkcs1_sha256(&self, message: &[u8]) -> Result<Vec<u8>> {
         let k = self.public.len();
         let digest = HashAlg::Sha256.digest(&[message]);
         let mut em = [0u8; MAX_BYTES];

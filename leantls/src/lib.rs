@@ -93,7 +93,7 @@
 //! let trust = Trust::Pinned(PeerKey::new(leader_key));
 //! let mut conn = connect(tcp, &trust, "leader", Entropy::new(seed)).await?;
 //! // ... lezen en schrijven via AsyncRead en AsyncWrite ...
-//! conn.close_notify().await?;
+//! core::future::poll_fn(|cx| conn.poll_close_notify(cx)).await?;
 //! # Ok(())
 //! # }
 //! ```

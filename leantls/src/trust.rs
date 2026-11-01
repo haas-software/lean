@@ -19,24 +19,6 @@ impl PeerKey {
         Self(bytes)
     }
 
-    /// Een pin uit een slice, bijvoorbeeld uit een configuratiebestand; een
-    /// verkeerde lengte is een fout met beide getallen.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// assert!(leantls::PeerKey::from_slice(&[0u8; 5]).is_err());
-    /// assert!(leantls::PeerKey::from_slice(&[0u8; 32]).is_ok());
-    /// ```
-    pub fn from_slice(bytes: &[u8]) -> Result<Self> {
-        let mut k = [0u8; PUBLIC_KEY_LEN];
-        if bytes.len() != PUBLIC_KEY_LEN {
-            return Err(Error::PeerKeySize(bytes.len()));
-        }
-        k.copy_from_slice(bytes);
-        Ok(Self(k))
-    }
-
     /// De sleutelbytes.
     pub const fn as_bytes(&self) -> &[u8; PUBLIC_KEY_LEN] {
         &self.0

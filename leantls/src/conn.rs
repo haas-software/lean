@@ -21,7 +21,6 @@ use crate::record::{
     self, HEADER, MAX_CIPHER, MAX_PLAIN, REC_ALERT, REC_APP_DATA, REC_HANDSHAKE, WRITE_BUF,
 };
 use crate::schedule::Direction;
-use crate::trust::PeerKey;
 
 /// Handshake-berichttype NewSessionTicket.
 pub(crate) const HS_NEW_SESSION_TICKET: u8 = 4;
@@ -82,8 +81,6 @@ pub struct Conn<T> {
     pub(crate) hs: Vec<u8>,
     /// Het lopende transcript; tussenstanden zijn een `clone`.
     pub(crate) transcript: Sha256,
-    /// De pin die de server bewees, in gepinde modus.
-    pub(crate) peer_key: Option<PeerKey>,
     /// Het protocol dat ALPN opleverde, als er een gekozen werd.
     pub(crate) alpn: Option<Vec<u8>>,
 }
@@ -119,14 +116,8 @@ impl<T> Conn<T> {
             close_queued: false,
             hs: Vec::new(),
             transcript: Sha256::new(),
-            peer_key: None,
             alpn: None,
         })
-    }
-
-    /// De sleutel die de server bewees, in gepinde modus.
-    pub fn peer_key(&self) -> Option<&PeerKey> {
-        self.peer_key.as_ref()
     }
 
     /// Het protocol dat ALPN (RFC 7301) opleverde, zoals `b"h2"`. `None` als
@@ -155,7 +146,7 @@ impl<T> Conn<T> {
     }
 
     /// Geeft het transport terug; sleutels en buffers worden gewist en
-    /// vrijgegeven. Stuur eerst [`Conn::close_notify`] voor een net einde.
+    /// vrijgegeven. Stuur eerst [`Conn::poll_close_notify`] voor een net einde.
     pub fn into_inner(self) -> T {
         let Self { io, .. } = self;
         io
@@ -351,11 +342,6 @@ where
         }
         ready!(self.poll_flush(cx))?;
         Poll::Ready(Ok(()))
-    }
-
-    /// De async-vorm van [`Conn::poll_close_notify`].
-    pub async fn close_notify(&mut self) -> Result<(), ConnError<E>> {
-        poll_fn(|cx| self.poll_close_notify(cx)).await
     }
 
     /// Schrijft de buffer leeg, als future.

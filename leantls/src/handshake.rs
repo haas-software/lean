@@ -629,7 +629,6 @@ where
                         want: *pin.as_bytes(),
                     });
                 }
-                self.peer_key = Some(pin);
                 Ok(Verifier::Pinned(got))
             }
             Trust::Chain(v) => {

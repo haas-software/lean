@@ -36,8 +36,6 @@ pub enum Error {
         /// Tag van de SubjectPublicKeyInfo.
         tag: u8,
     },
-    /// Een pin heeft de verkeerde lengte.
-    PeerKeySize(usize),
     /// Ketenverificatie zonder servernaam.
     ServerNameRequired,
     /// Een servernaam past niet in SNI.
@@ -231,11 +229,6 @@ impl fmt::Display for Error {
                 f,
                 "server certificate does not carry an Ed25519 key - this package only speaks \
                  Ed25519 (SubjectPublicKeyInfo is {len} bytes, tag {tag:#x})"
-            ),
-            Error::PeerKeySize(n) => write!(
-                f,
-                "Config.PeerKey is {n} bytes, an Ed25519 public key is {}",
-                crate::crypto::ed25519::PUBLIC_KEY_LEN
             ),
             Error::ServerNameRequired => f.write_str(
                 "Config.ServerName is required with VerifyPeer - a chain that is not checked \

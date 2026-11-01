@@ -47,12 +47,12 @@ use cert::{Cert, PublicKey, SigAlg, key_usage};
 /// lang (GitHub stuurt er 3); 8 laat ruimte voor kruis-ondertekening en
 /// begrenst het zoekwerk. De lijst van wie meer stuurt, wordt geweigerd in
 /// plaats van afgekapt: een stille afkapping zou een ander pad kunnen kiezen.
-pub const MAX_CHAIN: usize = 8;
+pub(crate) const MAX_CHAIN: usize = 8;
 
 /// Langste pad, blad en wortel meegeteld. Publieke paden zijn hooguit 4
 /// (blad, twee tussen-CA's, wortel); 6 laat een extra kruisschakel toe en
 /// begrenst de recursie van de padzoeker.
-pub const MAX_DEPTH: usize = 6;
+pub(crate) const MAX_DEPTH: usize = 6;
 
 /// Meeste wortels. De Mozilla-set heeft er ongeveer 150; 1024 is ruim en
 /// houdt het zoeken naar een issuer lineair en klein.
@@ -61,7 +61,7 @@ pub const MAX_ROOTS: usize = 1024;
 /// Meeste handtekeningcontroles per keten. Een kwaadwillige server kan veel
 /// kandidaten met dezelfde naam sturen; Go begrenst dit op 100. Met
 /// [`MAX_CHAIN`] van 8 is 32 genoeg voor elk echt pad met terugkrabbelen.
-pub const MAX_SIGNATURE_CHECKS: usize = 32;
+pub(crate) const MAX_SIGNATURE_CHECKS: usize = 32;
 
 /// De TLS 1.3-handtekeningcodes (RFC 8446 §4.2.3) die [`ChainVerifier`]
 /// kan controleren, goedkoopste eerst. De server kiest hieruit.
@@ -131,7 +131,7 @@ pub enum X509Error {
         /// Wat er ontbreekt.
         what: &'static str,
     },
-    /// De server stuurde meer certificaten dan [`MAX_CHAIN`].
+    /// De server stuurde meer certificaten dan 8 (`MAX_CHAIN`).
     TooManyCertificates(usize),
     /// Meer wortels dan [`MAX_ROOTS`], of geen enkele.
     RootCount(usize),
@@ -198,7 +198,8 @@ pub enum X509Error {
         /// Welk certificaat.
         cert: CertRef,
     },
-    /// Geen pad binnen [`MAX_DEPTH`] of [`MAX_SIGNATURE_CHECKS`].
+    /// Geen pad binnen 6 schakels (`MAX_DEPTH`) of 32 handtekeningcontroles
+    /// (`MAX_SIGNATURE_CHECKS`).
     Limit(&'static str),
     /// De gekozen CertificateVerify-code past niet bij de sleutel van het blad.
     KeyMismatch(u16),
@@ -291,8 +292,6 @@ impl From<X509Error> for Error {
 pub struct Roots<'a> {
     /// Waar de DER staat.
     src: RootSource<'a>,
-    /// Aantal wortels.
-    len: usize,
 }
 
 /// De twee vormen waarin een aanroeper wortels heeft.
@@ -318,30 +317,21 @@ impl<'a> Roots<'a> {
 
     /// Leest elke wortel één keer en telt ze.
     fn checked(src: RootSource<'a>) -> Result<Self> {
-        let mut roots = Self { src, len: 0 };
+        let roots = Self { src };
+        let mut n = 0;
         for (i, der) in roots.iter_raw().enumerate() {
             let cert = CertRef::Root(u16::try_from(i).unwrap_or(u16::MAX));
             let der = der.map_err(|field| X509Error::Malformed { cert, field })?;
             Cert::parse(der).map_err(|field| X509Error::Malformed { cert, field })?;
-            roots.len = i + 1;
-            if roots.len > MAX_ROOTS {
-                return Err(X509Error::RootCount(roots.len).into());
+            n = i + 1;
+            if n > MAX_ROOTS {
+                return Err(X509Error::RootCount(n).into());
             }
         }
-        if roots.len == 0 {
+        if n == 0 {
             return Err(X509Error::RootCount(0).into());
         }
         Ok(roots)
-    }
-
-    /// Aantal wortels.
-    pub fn len(&self) -> usize {
-        self.len
-    }
-
-    /// Altijd `false`: een lege set bestaat niet.
-    pub fn is_empty(&self) -> bool {
-        self.len == 0
     }
 
     /// De DER van elke wortel, of het veld waar het splitsen faalde.

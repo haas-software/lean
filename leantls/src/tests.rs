@@ -233,7 +233,6 @@ fn client_against_stdlib_server() {
         entropy(),
     ))
     .unwrap_or_else(|e| panic!("handshake: {e}"));
-    assert_eq!(conn.peer_key(), Some(&PeerKey::new(srv.key)));
 
     let msg = b"hallo van leantls";
     block_on(write_all(&mut conn, msg)).unwrap();
@@ -315,19 +314,6 @@ fn wrong_pin_refused() {
 }
 
 #[test]
-fn no_pin_refused() {
-    // Go testte nil, een lege Config en een pin van 5 bytes. De eerste twee
-    // compileren hier niet (zie de compile_fail-voorbeelden bij `Trust`); de
-    // derde is een fout bij het maken van de pin.
-    for n in [0usize, 5, 31, 33] {
-        assert!(
-            PeerKey::from_slice(&vec![0u8; n]).is_err(),
-            "pin van {n} bytes geaccepteerd"
-        );
-    }
-}
-
-#[test]
 fn tls12_server_refused() {
     let Some(srv) = go_server("echo12") else {
         return;
@@ -388,7 +374,7 @@ fn close_sends_close_notify() {
     };
     let mut conn = block_on(connect(dial(&srv), &pinned(&srv), "", entropy())).unwrap();
     block_on(write_all(&mut conn, b"tot ziens")).unwrap();
-    block_on(conn.close_notify()).unwrap_or_else(|e| panic!("close: {e}"));
+    block_on(poll_fn(|cx| conn.poll_close_notify(cx))).unwrap_or_else(|e| panic!("close: {e}"));
     drop(conn);
 
     let mut out = srv.out.take().unwrap();
@@ -964,7 +950,7 @@ fn record_write_error_is_permanent_across_application_retry() {
 
     // Close na een permanente schrijffout: geen close_notify meer, wel het
     // transport dicht.
-    assert!(block_on(c.close_notify()).is_err());
+    assert!(block_on(poll_fn(|cx| c.poll_close_notify(cx))).is_err());
     drop(c);
     let s = state.borrow();
     assert_eq!(
@@ -1001,7 +987,7 @@ fn blocked_close_notify_still_closes_transport() {
     state.borrow_mut().block_writes = true;
     let mut c = encrypted_conn_for_close_test(raw);
     {
-        let mut f = pin!(c.close_notify());
+        let mut f = pin!(poll_fn(|cx| c.poll_close_notify(cx)));
         assert!(
             poll_once(f.as_mut()).is_pending(),
             "close_notify werd niet geprobeerd"
@@ -1029,12 +1015,6 @@ fn trust_model_required() {
     assert!(
         !state.borrow().touched,
         "er ging iets over het transport voor de weigering"
-    );
-
-    let err = PeerKey::from_slice(&[0u8; 8]).expect_err("pin van de verkeerde maat");
-    assert!(
-        err.to_string().contains("an Ed25519 public key is"),
-        "{err}"
     );
 
     let (raw, _) = mock();
@@ -1256,7 +1236,7 @@ fn oversized_record_refused_before_reading() {
 fn write_after_close_notify_is_refused() {
     let (raw, state) = mock();
     let mut c = encrypted_conn_for_close_test(raw);
-    block_on(c.close_notify()).unwrap();
+    block_on(poll_fn(|cx| c.poll_close_notify(cx))).unwrap();
     assert_eq!(state.borrow().writes, 1);
     let err = block_on(write_all(&mut c, b"te laat")).unwrap_err();
     assert!(err == Error::Closed);
@@ -1872,7 +1852,8 @@ where
     let mut got = vec![0u8; msg.len()];
     block_on(read_exact(conn, &mut got)).unwrap_or_else(|e| panic!("{what}: lezen: {e}"));
     assert_eq!(got, msg, "{what}: echo");
-    block_on(conn.close_notify()).unwrap_or_else(|e| panic!("{what}: close: {e}"));
+    block_on(poll_fn(|cx| conn.poll_close_notify(cx)))
+        .unwrap_or_else(|e| panic!("{what}: close: {e}"));
 }
 
 /// Zoals de RavenDB-node op macOS (07-10-2026): alleen TLS 1.2,
