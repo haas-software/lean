@@ -24,7 +24,7 @@ use core::task::{Context, Poll};
 use crate::hpack::Decoder;
 use crate::stream::{self, Body, Handler, Mailbox, Request, Response};
 use crate::{
-    AsyncRead, AsyncWrite, CLIENT_PREFACE, CODE_INTERNAL_ERROR, CODE_NO_ERROR,
+    AsyncRead, AsyncWrite, CLIENT_PREFACE, CODE_INTERNAL_ERROR, CODE_NO_ERROR, CODE_REFUSED_STREAM,
     CONNECTION_WINDOW_INCREMENT, Error, FLAG_ACK, FLAG_END_HEADERS, FLAG_END_STREAM, FLAG_PADDED,
     FLAG_PRIORITY, FRAME_CONTINUATION, FRAME_DATA, FRAME_GOAWAY, FRAME_HEADERS, FRAME_PING,
     FRAME_PRIORITY, FRAME_PUSH_PROMISE, FRAME_RST_STREAM, FRAME_SETTINGS, FRAME_WINDOW_UPDATE,
@@ -166,9 +166,10 @@ struct State {
     settings_acked: bool,
     /// De hoogste geaccepteerde stream-id; hij maakt hergebruik zichtbaar.
     last_stream_id: u32,
-    /// De slot-index van een open header-blok; dan is alleen CONTINUATION op
-    /// die stream welkom.
-    pending: Option<usize>,
+    /// Een open header-blok: de stream, en zijn slot (`None` als hij geen
+    /// slot kreeg en geweigerd wordt). Dan is alleen CONTINUATION op die
+    /// stream welkom.
+    pending: Option<(u32, Option<usize>)>,
     /// Het gecomprimeerde blok dat nog groeit.
     header_buf: Vec<u8>,
     /// Het verbindingsvenster dat de peer ons gaf.
@@ -406,7 +407,7 @@ impl State {
             self.peer_settings = true;
         }
         // Een header-blok is één eenheid: zolang het open is, mag er niets anders.
-        if let Some(open) = self.pending.and_then(|i| self.wire(i)).map(|w| w.id) {
+        if let Some((open, _)) = self.pending {
             if typ != FRAME_CONTINUATION || stream != open {
                 return Err(Error::HeaderBlockInterrupted {
                     frame: typ,
@@ -601,10 +602,20 @@ impl State {
         }
         let free = (0..MAX_CONCURRENT_STREAMS)
             .find(|&i| tasks.get(i).is_some_and(Option::is_none) && self.wire(i).is_none());
-        let Some(i) = free else {
-            return Err(Error::TooManyStreams);
-        };
         self.last_stream_id = stream;
+        let Some(i) = free else {
+            // Alle slots bezet, ook door handlers van streams die de peer al
+            // resette en dus niet meer meetelt: deze ene stream weigeren, niet
+            // de verbinding (RFC 9113 §5.1.2, REFUSED_STREAM; F4). Het blok
+            // wordt toch gedecodeerd: de HPACK-staat is van de verbinding.
+            self.header_buf.clear();
+            append(&mut self.header_buf, block)?;
+            if flags & FLAG_END_HEADERS == 0 {
+                self.pending = Some((stream, None));
+                return Ok(());
+            }
+            return self.refuse(stream);
+        };
         if let Some(slot) = self.wires.get_mut(i) {
             *slot = Some(Wire {
                 id: stream,
@@ -621,10 +632,26 @@ impl State {
         self.header_buf.clear();
         append(&mut self.header_buf, block)?;
         if flags & FLAG_END_HEADERS == 0 {
-            self.pending = Some(i);
+            self.pending = Some((stream, Some(i)));
             return Ok(());
         }
         self.start_stream(i, handler, boxes, tasks)
+    }
+
+    /// Weigert een stream zonder slot: zijn blok decoderen en weggooien, en
+    /// RST_STREAM met REFUSED_STREAM. DATA die al onderweg was, krijgt zijn
+    /// krediet terug zoals bij elke reset.
+    fn refuse(&mut self, stream: u32) -> Result {
+        let decoded = self.dec.decode(&self.header_buf);
+        self.header_buf.clear();
+        decoded.map_err(|cause| Error::HeaderBlock { stream, cause })?;
+        self.remember_reset(stream, i64::from(OUR_INITIAL_WINDOW));
+        self.frame(
+            FRAME_RST_STREAM,
+            0,
+            stream,
+            &CODE_REFUSED_STREAM.to_be_bytes(),
+        )
     }
 
     /// Het vervolg van een open header-blok.
@@ -637,7 +664,7 @@ impl State {
         boxes: &'b [Mailbox; MAX_CONCURRENT_STREAMS],
         tasks: &mut [Option<H::Future<'b>>; MAX_CONCURRENT_STREAMS],
     ) -> Result {
-        let Some(i) = self.pending else {
+        let Some((_, slot)) = self.pending else {
             return Err(Error::ContinuationWithoutBlock);
         };
         if self.header_buf.len() + block.len() > MAX_COMPRESSED_HEADERS {
@@ -648,7 +675,10 @@ impl State {
             return Ok(());
         }
         self.pending = None;
-        self.start_stream(i, handler, boxes, tasks)
+        match slot {
+            Some(i) => self.start_stream(i, handler, boxes, tasks),
+            None => self.refuse(stream),
+        }
     }
 
     /// Decodeert het blok, toetst het verzoek en zet de handler aan het werk.

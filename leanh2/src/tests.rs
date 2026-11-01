@@ -791,8 +791,10 @@ fn header_block_is_indivisible_outbound() {
     assert_eq!(blocks, 2);
 }
 
-// Meer streams dan aangekondigd wordt geweigerd: de cap begrenst wat één peer
-// aan futures en buffers kan claimen.
+// Meer streams dan er slots zijn: de cap begrenst wat één peer aan futures en
+// buffers kan claimen. De stream zonder slot krijgt REFUSED_STREAM en mag
+// opnieuw; de verbinding en de andere streams blijven (RFC 9113 §5.1.2, F4:
+// ook een handler van een stream die de peer al resette, houdt zijn slot).
 #[test]
 fn concurrent_stream_cap() {
     let hold = Rc::new(Cell::new(false));
@@ -814,7 +816,25 @@ fn concurrent_stream_cap() {
             &header_block("/vast"),
         );
     }
-    p.assert_connection_error("more than the announced");
+    let (_, stream, body) = p.read_until(FRAME_RST_STREAM);
+    assert_eq!(stream, 1 + 2 * MAX_CONCURRENT_STREAMS as u32);
+    assert_eq!(body, CODE_REFUSED_STREAM.to_be_bytes());
+    // Ook over HEADERS en CONTINUATION: het blok wordt gelezen, dan geweigerd.
+    let block = header_block("/vast");
+    let (a, b) = block.split_at(block.len() / 2);
+    let next = 3 + 2 * MAX_CONCURRENT_STREAMS as u32;
+    p.frame(FRAME_HEADERS, FLAG_END_STREAM, next, a);
+    p.frame(FRAME_CONTINUATION, FLAG_END_HEADERS, next, b);
+    let (_, stream, body) = p.read_until(FRAME_RST_STREAM);
+    assert_eq!(
+        (stream, body),
+        (next, CODE_REFUSED_STREAM.to_be_bytes().to_vec())
+    );
+    // De verbinding leeft nog: een PING krijgt zijn ACK.
+    p.frame(FRAME_PING, 0, 0, &[3; 8]);
+    let (flags, _, body) = p.read_until(FRAME_PING);
+    assert_eq!((flags, body.as_slice()), (FLAG_ACK, &[3u8; 8][..]));
+    assert!(p.done().is_none(), "de verbinding viel");
 }
 
 // De verzoekregels van RFC 9113 §8.3 en §8.2.2. Een toegeeflijke implementatie

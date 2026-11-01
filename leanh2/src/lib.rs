@@ -113,6 +113,8 @@ const FLAG_PRIORITY: u8 = 0x20;
 /// kon afmaken. Protocolfouten van de peer beëindigen `serve`.
 const CODE_NO_ERROR: u32 = 0x0;
 const CODE_INTERNAL_ERROR: u32 = 0x2;
+/// REFUSED_STREAM: de stream is niet begonnen en mag opnieuw (RFC 9113 §8.7).
+const CODE_REFUSED_STREAM: u32 = 0x7;
 
 /// Wat deze kant aankondigt, en dus moet overleven.
 ///
@@ -291,8 +293,6 @@ pub enum Error {
         /// De laatst geaccepteerde.
         last: u32,
     },
-    /// Meer dan 32 streams tegelijk.
-    TooManyStreams,
     /// Een header-blok boven 64 KiB gecomprimeerd.
     HeaderBlockTooLarge {
         /// De stream.
@@ -492,10 +492,6 @@ impl fmt::Display for Error {
             Self::StreamNotIncreasing { stream, last } => {
                 write!(f, "stream {stream} is not above the last accepted {last}")
             }
-            Self::TooManyStreams => write!(
-                f,
-                "peer opened more than the announced {MAX_CONCURRENT_STREAMS} concurrent streams"
-            ),
             Self::HeaderBlockTooLarge { stream } => write!(
                 f,
                 "header block of stream {stream} above the {MAX_COMPRESSED_HEADERS} byte limit"
