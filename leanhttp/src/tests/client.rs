@@ -1554,6 +1554,38 @@ fn expect_oordeel_is_een_termijn() {
     });
 }
 
+/// F11: een verbinding die dichtgaat vóór het oordeel, zegt dat ook; alleen
+/// de termijn heet NoVerdict.
+#[test]
+fn expect_zonder_oordeel_houdt_de_oorzaak() {
+    let n = net(
+        "srv:80",
+        script(|mut conn| async move {
+            let _ = read_head(&mut conn).await;
+        }),
+    );
+    block_on(async {
+        let mut d = n.clone();
+        let mut src = NoRead;
+        let err = fetch(
+            &mut d,
+            Call {
+                method: "PUT",
+                body_reader: Some(&mut src),
+                body_len: 4,
+                header_timeout: Some(Duration::from_millis(500)),
+                ..call("http://srv/")
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, Error::Eof | Error::UnexpectedEof | Error::Io(_)),
+            "{err:?}"
+        );
+    });
+}
+
 #[test]
 fn expect_hoort_bij_het_pakket() {
     let mut header = Header::new();

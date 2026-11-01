@@ -144,6 +144,8 @@ pub enum Error {
         want: u64,
     },
     /// Geen `100` en geen eindstatus binnen de beslistermijn van `Expect`.
+    /// Een andere fout op die regel (reset, EOF, een te lange regel) komt
+    /// met haar eigen naam terug.
     NoVerdict,
     /// Meer redirects dan de grens.
     TooManyRedirects {

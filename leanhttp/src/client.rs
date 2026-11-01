@@ -452,6 +452,15 @@ fn fail(err: Error) -> HopError {
     HopError { err, stale: false }
 }
 
+/// Of `e` zegt dat de verbinding dicht was: EOF, reset of close. Alleen dan is
+/// een pool-verbinding verlopen (RFC 9112 §9.3.1).
+fn closed(e: &Error) -> bool {
+    matches!(
+        e,
+        Error::Eof | Error::UnexpectedEof | Error::Io(IoError::Reset | IoError::Closed)
+    )
+}
+
 /// De redirectlus, met of zonder pool.
 pub(crate) async fn follow<D: Dial>(
     dialer: &mut D,
@@ -710,9 +719,13 @@ async fn exchange<C: Conn>(
     keep_alive: bool,
     pooled: bool,
 ) -> core::result::Result<Head, HopError> {
-    // Een hergebruikte verbinding die faalt vóór de eerste antwoordbyte, mag
-    // veilig opnieuw.
-    let stale = |err: Error| HopError { err, stale: pooled };
+    // Een hergebruikte verbinding die dicht bleek vóór de eerste antwoordbyte,
+    // mag veilig opnieuw (RFC 9112 §9.3.1); rommel of een te lange regel niet
+    // (F8).
+    let stale = |err: Error| HopError {
+        stale: pooled && closed(&err),
+        err,
+    };
     let io = |e: IoError| fail(Error::Io(e));
     write_all(conn, head).await.map_err(|e| stale(e.into()))?;
     let streaming = call.body_reader.is_some();
@@ -740,7 +753,11 @@ async fn exchange<C: Conn>(
     let (status, is_10, reason) = loop {
         let line = match rbuf.read_line(conn, &mut budget).await {
             Ok(l) => l,
-            Err(_) if first && !body_sent => return Err(fail(Error::NoVerdict)),
+            // Alleen de termijn is "geen oordeel"; een reset of een te lange
+            // regel houdt zijn eigen naam (F11).
+            Err(Error::Io(IoError::TimedOut)) if first && !body_sent => {
+                return Err(fail(Error::NoVerdict));
+            }
             Err(e) if first => return Err(stale(e)),
             Err(e) => return Err(fail(e)),
         };

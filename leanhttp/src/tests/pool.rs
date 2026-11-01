@@ -591,3 +591,26 @@ fn poolsleutel_draagt_het_schema() {
         assert!(cl.pool.take("https://srv:443", now()).await.is_none());
     });
 }
+
+/// F8: alleen een verbinding die dicht bleek, is verlopen. Rommel op de
+/// eerste regel van een hergebruikte verbinding is een fout, geen reden voor
+/// een tweede verzoek.
+#[test]
+fn rommel_op_een_poolverbinding_krijgt_geen_herkansing() {
+    let n = net(
+        "srv:80",
+        script(|mut conn| async move {
+            let _ = read_head(&mut conn).await;
+            let _ = write_all(&mut conn, b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok").await;
+            let _ = read_head(&mut conn).await;
+            let _ = write_all(&mut conn, b"rommel\r\n\r\n").await;
+            sleep(Duration::from_millis(50)).await;
+        }),
+    );
+    block_on(async {
+        let mut cl = Client::new(n.clone());
+        fetch_all(&mut cl, "http://srv/").await;
+        assert!(cl.send(call("http://srv/"), now()).await.is_err());
+    });
+    assert_eq!(n.accepted("srv:80"), 1, "rommel gaf een tweede verbinding");
+}
