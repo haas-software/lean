@@ -1,10 +1,10 @@
-//! Random voor een node: bytes, een id, een begrensd getal, jitter op een wachttijd.
+//! Random voor een node: jitter op een wachttijd.
 //!
-//! Deze crate bezit de vier vormen waarin een node toeval nodig heeft, en de
-//! drie fouten die daar steeds weer in sluipen: een foutpad voor een fout die
-//! niet kan, `% n`-bias, en herhaalpogingen die in de pas lopen. [`below`]
-//! trekt met afwijzing, [`jitter`] spreidt een wachttijd over ±50%, en
-//! [`Source::fill`] heeft geen foutpad.
+//! Deze crate bezit de spreiding van een wachttijd, en de twee fouten die
+//! daar steeds weer in sluipen: `% n`-bias en herhaalpogingen die in de pas
+//! lopen. [`jitter`] spreidt een wachttijd over ±50%, met een trekking die
+//! afwijst in plaats van `% n` te nemen, en [`Source::fill`] heeft geen
+//! foutpad.
 //!
 //! Wat hij NIET bezit: de bron zelf. Op bare metal is er geen OS-entropie, dus
 //! de aanroeper levert een [`Source`] (de RNG van de SoC, een DRBG met een
@@ -12,15 +12,15 @@
 //! per aanroep; hier is het één bron per eigenaar, als parameter, zodat een
 //! test deterministisch toeval kan geven zonder globale staat.
 //!
-//! De Go-versie verving `github.com/google/uuid`, dat 3.793 bytes aan
-//! symbolen en `database/sql/driver` in de HopOS-kern trok voor twee
-//! aanroepen, waarvan één afgekapt op acht tekens (gemeten 12-08-2026). Een
-//! eigen generator, een zaad, een reproduceerbare productiestroom en een
-//! UUID-vorm zijn er daarom bewust niet.
+//! Bytes, hex en ids (de Go-vormen `Read`, `Bytes`, `Hex` en `ID`) zijn weg
+//! sinds 01-11-2026: geen van de zes gebruikers riep ze aan (L8,
+//! docs/sequence-lean.md §14). Een eigen generator, een zaad en een
+//! UUID-vorm zijn er bewust niet.
 //!
 //! # Examples
 //!
 //! ```
+//! use core::time::Duration;
 //! use leanrand::Source;
 //!
 //! /// Een tellende bron; alleen goed genoeg voor een voorbeeld.
@@ -36,11 +36,9 @@
 //! }
 //!
 //! let mut src = Counter(0);
-//! let v = leanrand::below(&mut src, 6);
-//! assert!(v < 6);
-//! let id = leanrand::id(&mut src, 12)?;
-//! assert_eq!(id.len(), 12);
-//! # Ok::<(), leanrand::Error>(())
+//! let d = Duration::from_secs(2);
+//! let wait = leanrand::jitter(&mut src, d);
+//! assert!(wait >= d / 2 && wait < d + d / 2);
 //! ```
 
 #![cfg_attr(not(test), no_std)]
@@ -55,19 +53,7 @@
 )]
 #![forbid(unsafe_code)]
 
-extern crate alloc;
-
-use alloc::string::String;
-use alloc::vec::Vec;
-use core::fmt;
 use core::time::Duration;
-
-/// Het alfabet van [`id`]: Crockford base32 zonder I, L, O en U.
-///
-/// Twee redenen. Vijf bits per teken zonder bias, want 32 deelt 256. En geen
-/// paren die je verkeerd overtypt (1/I/L, 0/O), want een id wordt voorgelezen
-/// en overgetikt.
-const ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
 /// Een bron van toeval die een buffer volledig vult.
 ///
@@ -87,56 +73,8 @@ impl<S: Source + ?Sized> Source for &mut S {
     }
 }
 
-/// Een fout uit deze crate.
-///
-/// Toeval zelf faalt niet (zie [`Source`]); alleen de heap kan nee zeggen.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Error {
-    /// De heap kon `bytes` bytes niet leveren.
-    Alloc {
-        /// Het gevraagde aantal bytes.
-        bytes: usize,
-    },
-}
-
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Alloc { bytes } => write!(f, "leanrand: cannot allocate {bytes} bytes"),
-        }
-    }
-}
-
-impl core::error::Error for Error {}
-
-/// Het resultaat van deze crate.
-pub type Result<T = (), E = Error> = core::result::Result<T, E>;
-
-/// Vult `buf` met toeval uit `src`.
-///
-/// Een dunne naam rond [`Source::fill`], zodat een aanroeper die alleen deze
-/// crate kent niet naar de trait hoeft te grijpen.
-pub fn read<S: Source + ?Sized>(src: &mut S, buf: &mut [u8]) {
-    src.fill(buf);
-}
-
-/// Geeft `n` bytes toeval; leeg bij `n == 0`.
-///
-/// De allocatie is faalbaar: een gevraagde maat komt vaak van buiten.
-pub fn bytes<S: Source + ?Sized>(src: &mut S, n: usize) -> Result<Vec<u8>> {
-    let mut out = Vec::new();
-    if n == 0 {
-        return Ok(out);
-    }
-    out.try_reserve_exact(n)
-        .map_err(|_| Error::Alloc { bytes: n })?;
-    out.resize(n, 0);
-    src.fill(&mut out);
-    Ok(out)
-}
-
 /// Geeft een `u64` over het volle bereik.
-pub fn next_u64<S: Source + ?Sized>(src: &mut S) -> u64 {
+fn next_u64<S: Source + ?Sized>(src: &mut S) -> u64 {
     let mut b = [0u8; 8];
     src.fill(&mut b);
     u64::from_le_bytes(b)
@@ -149,7 +87,7 @@ pub fn next_u64<S: Source + ?Sized>(src: &mut S) -> u64 {
 /// een trekking boven het grootste volle veelvoud van `n` weggegooid. Dat
 /// kost gemiddeld minder dan twee trekkingen, ook net boven 2^63, het
 /// slechtste geval.
-pub fn below<S: Source + ?Sized>(src: &mut S, n: u64) -> u64 {
+fn below<S: Source + ?Sized>(src: &mut S, n: u64) -> u64 {
     if n <= 1 {
         return 0;
     }
@@ -163,64 +101,6 @@ pub fn below<S: Source + ?Sized>(src: &mut S, n: u64) -> u64 {
             return v % n;
         }
     }
-}
-
-/// Geeft `2 * n` kleine hexadecimale tekens uit `n` bytes toeval.
-pub fn hex<S: Source + ?Sized>(src: &mut S, n: usize) -> Result<String> {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let len = n.checked_mul(2).ok_or(Error::Alloc { bytes: usize::MAX })?;
-    let mut out = String::new();
-    out.try_reserve_exact(len)
-        .map_err(|_| Error::Alloc { bytes: len })?;
-    let mut chunk = [0u8; 32];
-    let mut left = n;
-    while left > 0 {
-        let take = left.min(chunk.len());
-        let part = chunk.get_mut(..take).unwrap_or_default();
-        src.fill(part);
-        for &c in part.iter() {
-            // De capaciteit staat al vast: deze pushes groeien niet.
-            out.push(char::from(DIGITS[usize::from(c >> 4)]));
-            out.push(char::from(DIGITS[usize::from(c & 0xf)]));
-        }
-        left -= take;
-    }
-    Ok(out)
-}
-
-/// Vult `out` met een id uit het Crockford-alfabet, vijf bits per teken.
-///
-/// De allocatievrije vorm van [`id`]: elke byte in `out` wordt een ASCII-teken.
-pub fn fill_id<S: Source + ?Sized>(src: &mut S, out: &mut [u8]) {
-    src.fill(out);
-    for b in out.iter_mut() {
-        // 32 deelt 256, dus de onderste vijf bits zijn zonder bias.
-        *b = ALPHABET[usize::from(*b & 31)];
-    }
-}
-
-/// Geeft een id van `n` tekens uit het Crockford-alfabet; leeg bij `n == 0`.
-///
-/// Twaalf tekens zijn 60 bits, zestien zijn er 80.
-pub fn id<S: Source + ?Sized>(src: &mut S, n: usize) -> Result<String> {
-    let mut out = String::new();
-    if n == 0 {
-        return Ok(out);
-    }
-    out.try_reserve_exact(n)
-        .map_err(|_| Error::Alloc { bytes: n })?;
-    let mut chunk = [0u8; 32];
-    let mut left = n;
-    while left > 0 {
-        let take = left.min(chunk.len());
-        let part = chunk.get_mut(..take).unwrap_or_default();
-        fill_id(src, part);
-        for &c in part.iter() {
-            out.push(char::from(c));
-        }
-        left -= take;
-    }
-    Ok(out)
 }
 
 /// Spreidt `d` over ±50%: het antwoord ligt in `[d/2, 3d/2)`.
@@ -241,7 +121,6 @@ pub fn jitter<S: Source + ?Sized>(src: &mut S, d: Duration) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashSet;
 
     /// SplitMix64, gezaaid uit de klok en een teller: goed genoeg om de
     /// eigenschappen te toetsen, en nooit tweemaal dezelfde stroom.
@@ -273,25 +152,6 @@ mod tests {
                 chunk.copy_from_slice(&v[..chunk.len()]);
             }
         }
-    }
-
-    #[test]
-    fn test_bytes_lengte() -> Result {
-        let mut src = TestSource::new();
-        assert_eq!(bytes(&mut src, 32)?.len(), 32);
-        assert!(bytes(&mut src, 0)?.is_empty());
-        // Go kende ook Bytes(-1); een usize kan niet negatief zijn.
-        Ok(())
-    }
-
-    #[test]
-    fn test_bytes_vult_echt_vol() -> Result {
-        let mut src = TestSource::new();
-        let a = bytes(&mut src, 64)?;
-        let b = bytes(&mut src, 64)?;
-        assert_ne!(a, b, "twee trekkingen van 64 bytes waren identiek");
-        assert!(a.iter().any(|&c| c != 0), "64 bytes waren allemaal nul");
-        Ok(())
     }
 
     #[test]
@@ -336,68 +196,6 @@ mod tests {
             assert!(
                 (PER * 85 / 100..=PER * 115 / 100).contains(&c),
                 "bak {i} kreeg {c} van de {PER} verwachte trekkingen ({count:?})"
-            );
-        }
-    }
-
-    #[test]
-    fn test_hex() -> Result {
-        let mut src = TestSource::new();
-        let s = hex(&mut src, 16)?;
-        assert_eq!(s.len(), 32);
-        assert!(
-            s.bytes()
-                .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)),
-            "hex gaf iets dat geen hex is: {s:?}"
-        );
-        assert_eq!(hex(&mut src, 0)?, "");
-        // Meer dan één blok van 32 bytes.
-        assert_eq!(hex(&mut src, 100)?.len(), 200);
-        Ok(())
-    }
-
-    #[test]
-    fn test_id() -> Result {
-        let mut src = TestSource::new();
-        let s = id(&mut src, 12)?;
-        assert_eq!(s.len(), 12);
-        assert!(
-            s.bytes().all(|c| ALPHABET.contains(&c)),
-            "id gaf een teken buiten het alfabet: {s:?}"
-        );
-        assert!(
-            !s.contains(['I', 'L', 'O', 'U']),
-            "id gaf een teken dat je verkeerd overtypt: {s:?}"
-        );
-        assert_eq!(id(&mut src, 0)?, "");
-        assert_eq!(id(&mut src, 70)?.len(), 70);
-        Ok(())
-    }
-
-    #[test]
-    fn test_ids_zijn_uniek() -> Result {
-        const N: usize = 20_000;
-        let mut src = TestSource::new();
-        let mut seen = HashSet::with_capacity(N);
-        for i in 0..N {
-            let s = id(&mut src, 12)?;
-            assert!(
-                seen.insert(s.clone()),
-                "dubbele id na {i} trekkingen: {s:?}"
-            );
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn test_id_alfabet_heeft_geen_dubbels() {
-        assert_eq!(ALPHABET.len(), 32, "32 is de reden dat er geen bias is");
-        let mut seen = HashSet::new();
-        for &c in ALPHABET {
-            assert!(
-                seen.insert(c),
-                "alfabet bevat {:?} twee keer",
-                char::from(c)
             );
         }
     }
