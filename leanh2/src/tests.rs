@@ -157,7 +157,6 @@ struct Peer {
     pipe: Rc<RefCell<Pipe>>,
     serve: Pin<Box<dyn Future<Output = Outcome>>>,
     outcome: Option<Outcome>,
-    goaway: Rc<Cell<Option<GoAway>>>,
 }
 
 fn new_peer<H: Handler + 'static>(h: H) -> Peer {
@@ -177,21 +176,12 @@ fn new_peer_with_settings<H: Handler + 'static>(h: H, send_settings: bool) -> Pe
 
 fn raw_peer<H: Handler + 'static>(h: H, pipe: Pipe) -> Peer {
     let pipe = Rc::new(RefCell::new(pipe));
-    let goaway: Rc<Cell<Option<GoAway>>> = Rc::default();
-    let stop = goaway.clone();
     let mut conn = Conn::new(ServerEnd(pipe.clone()), h);
-    let serve = Box::pin(async move {
-        conn.serve(std::future::poll_fn(move |_| match stop.take() {
-            Some(g) => Poll::Ready(g),
-            None => Poll::Pending,
-        }))
-        .await
-    });
+    let serve = Box::pin(async move { conn.serve().await });
     let mut p = Peer {
         pipe,
         serve,
         outcome: None,
-        goaway,
     };
     p.run();
     p
@@ -679,22 +669,6 @@ fn wrong_preface() {
     );
 }
 
-// GOAWAY kondigt het stoppen één keer aan; er komt geen tweede frame.
-#[test]
-fn go_away_only_once() {
-    let mut p = new_peer(idle());
-    p.read_until(FRAME_SETTINGS);
-    p.read_until(FRAME_SETTINGS);
-    p.goaway.set(Some(GoAway::new(0, "stoppen").unwrap()));
-    let (_, _, body) = p.read_until(FRAME_GOAWAY);
-    assert!(body.ends_with(b"stoppen"));
-    // De stop is afgehandeld; een tweede aanvraag wordt niet meer gezien.
-    p.goaway.set(Some(GoAway::new(0, "nogmaals").unwrap()));
-    p.frame(FRAME_PING, 0, 0, &[9; 8]);
-    let (typ, _, _, _) = p.read();
-    assert_eq!(typ, FRAME_PING, "frame na de tweede GoAway");
-}
-
 // De discipline van stream-id's: door de client, oneven, strikt stijgend.
 #[test]
 fn stream_identifier_discipline() {
@@ -841,39 +815,6 @@ fn concurrent_stream_cap() {
         );
     }
     p.assert_connection_error("more than the announced");
-}
-
-// GOAWAY moet de hoogste geaccepteerde stream noemen. Nul zou uitnodigen tot
-// het herhalen van werk dat hier nog bijwerkingen kan hebben.
-#[test]
-fn go_away_reports_last_stream() {
-    let mut p = new_peer(no_content());
-    p.read_until(FRAME_SETTINGS);
-    p.frame(
-        FRAME_HEADERS,
-        FLAG_END_HEADERS | FLAG_END_STREAM,
-        1,
-        &header_block("/een"),
-    );
-    p.frame(
-        FRAME_HEADERS,
-        FLAG_END_HEADERS | FLAG_END_STREAM,
-        5,
-        &header_block("/twee"),
-    );
-    p.goaway.set(Some(GoAway::new(0, "klaar").unwrap()));
-    let (_, _, body) = p.read_until(FRAME_GOAWAY);
-    assert_eq!(
-        u32::from_be_bytes([body[0], body[1], body[2], body[3]]) & 0x7fff_ffff,
-        5
-    );
-    p.frame(
-        FRAME_HEADERS,
-        FLAG_END_HEADERS | FLAG_END_STREAM,
-        7,
-        &header_block("/na"),
-    );
-    p.assert_connection_error("after GOAWAY");
 }
 
 // De verzoekregels van RFC 9113 §8.3 en §8.2.2. Een toegeeflijke implementatie
@@ -1339,24 +1280,6 @@ fn adversarial_reserved_data_is_rechecked_after_initial_window_decrease() {
     assert_eq!(
         sent, OUR_MAX_FRAME,
         "Write ging niet verder onder het nieuwe venster"
-    );
-}
-
-#[test]
-fn adversarial_public_control_waits_for_startup() {
-    let mut p = raw_peer(
-        idle(),
-        Pipe {
-            peer_closed: true,
-            ..Pipe::default()
-        },
-    );
-    p.goaway.set(Some(GoAway::new(0, "too early").unwrap()));
-    assert!(matches!(p.done(), Some(Err(_))));
-    assert_eq!(
-        p.pipe.borrow().writes,
-        0,
-        "een stop voor de start schreef iets"
     );
 }
 
@@ -1910,7 +1833,7 @@ fn client_round_trip_with_own_server() {
 
     let pipe = Rc::new(RefCell::new(Pipe::default()));
     let mut conn = Conn::new(ServerEnd(pipe.clone()), h);
-    let mut serve = std::pin::pin!(conn.serve(std::future::pending()));
+    let mut serve = std::pin::pin!(conn.serve());
     let mut io = ClientEnd(pipe.clone());
     let mut send = std::pin::pin!(client::send(&mut io, &request, &limits));
     let mut cx = Context::from_waker(Waker::noop());

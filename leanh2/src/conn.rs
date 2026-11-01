@@ -18,7 +18,7 @@
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use core::future::{Future, poll_fn};
-use core::pin::{Pin, pin};
+use core::pin::Pin;
 use core::task::{Context, Poll};
 
 use crate::hpack::Decoder;
@@ -40,28 +40,6 @@ const OUT_HIGH: usize = 32 << 10;
 
 /// Rondes per poll voordat de lus zichzelf wekt en de executor laat ademen.
 const MAX_ROUNDS: usize = 64;
-
-/// Een aankondiging dat deze kant stopt. Hij meldt de hoogste stream die hij
-/// accepteerde en nog kan afmaken, en daarna komt er geen nieuwe stream meer
-/// bij. Minder melden kan de peer werk laten herhalen dat hier nog
-/// bijwerkingen heeft.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct GoAway {
-    /// De foutcode, meestal NO_ERROR (0).
-    code: u32,
-    /// Een leesbare reden voor de logs van de peer.
-    reason: &'static str,
-}
-
-impl GoAway {
-    /// Een GOAWAY met code en reden; de reden moet in één frame passen.
-    pub fn new(code: u32, reason: &'static str) -> Result<Self> {
-        if reason.len() > OUR_MAX_FRAME - 8 {
-            return Err(Error::GoAwayReasonTooLong { len: reason.len() });
-        }
-        Ok(Self { code, reason })
-    }
-}
 
 /// Eén HTTP/2-verbinding in de serverrol.
 ///
@@ -102,19 +80,15 @@ where
     /// Leest de preface, wisselt SETTINGS uit en bedient frames tot de
     /// verbinding eindigt; geeft de reden. Een `Conn` bedient precies één keer.
     ///
-    /// `shutdown` is de sierlijke stop: zodra hij klaar is, gaat er één GOAWAY
-    /// uit en wordt geen nieuwe stream meer geaccepteerd. Hij wordt pas gepold
-    /// nadat de preface gelezen en onze SETTINGS verstuurd zijn, zodat geen
-    /// GOAWAY het eerste frame kan zijn. Wie nooit sierlijk stopt, geeft
-    /// `core::future::pending()`.
+    /// Er is geen sierlijke stop: deze kant stuurt nooit GOAWAY (besluit L9,
+    /// 01-11-2026; er was geen gebruiker). Wie stopt, sluit het transport. Een
+    /// nette stop bij een herstart komt terug met F16 van
+    /// `docs/sequence-lean.md` gerepareerd.
     ///
     /// Voordat deze functie terugkeert, sluit hij het transport, krijgt elke
     /// levende handler nog één poll om de reden te zien, en worden alle streams
     /// losgelaten.
-    pub async fn serve<S>(&mut self, shutdown: S) -> Result<(), ServeError<IoError<T>>>
-    where
-        S: Future<Output = GoAway>,
-    {
+    pub async fn serve(&mut self) -> Result<(), ServeError<IoError<T>>> {
         if self.served {
             return Err(ServeError::Protocol(Error::ServedTwice));
         }
@@ -122,22 +96,12 @@ where
         let boxes: [Mailbox; MAX_CONCURRENT_STREAMS] = core::array::from_fn(|_| Mailbox::default());
         let mut tasks: [Option<H::Future<'_>>; MAX_CONCURRENT_STREAMS] =
             core::array::from_fn(|_| None);
-        let mut shutdown = pin!(shutdown);
         let io = &mut self.io;
         let handler = &mut self.handler;
         let result = match State::new() {
             Ok(mut state) => {
-                let r = poll_fn(|cx| {
-                    state.drive(
-                        cx,
-                        &mut *io,
-                        &mut *handler,
-                        &boxes,
-                        &mut tasks,
-                        shutdown.as_mut(),
-                    )
-                })
-                .await;
+                let r = poll_fn(|cx| state.drive(cx, &mut *io, &mut *handler, &boxes, &mut tasks))
+                    .await;
                 state.end_all(&boxes);
                 r
             }
@@ -200,12 +164,7 @@ struct State {
     peer_settings: bool,
     /// De peer bevestigde onze SETTINGS.
     settings_acked: bool,
-    /// Wij stuurden GOAWAY: geen nieuwe streams meer.
-    going_away: bool,
-    /// De stop-future is afgehandeld en wordt niet meer gepold.
-    shutdown_done: bool,
-    /// De hoogste geaccepteerde stream-id; GOAWAY meldt hem, en hij maakt
-    /// hergebruik zichtbaar.
+    /// De hoogste geaccepteerde stream-id; hij maakt hergebruik zichtbaar.
     last_stream_id: u32,
     /// De slot-index van een open header-blok; dan is alleen CONTINUATION op
     /// die stream welkom.
@@ -245,8 +204,6 @@ impl State {
             started: false,
             peer_settings: false,
             settings_acked: false,
-            going_away: false,
-            shutdown_done: false,
             last_stream_id: 0,
             pending: None,
             header_buf: Vec::new(),
@@ -262,22 +219,20 @@ impl State {
     }
 
     /// Draait rondes tot er niets meer te doen is.
-    fn drive<'b, T, H, S>(
+    fn drive<'b, T, H>(
         &mut self,
         cx: &mut Context<'_>,
         io: &mut T,
         handler: &mut H,
         boxes: &'b [Mailbox; MAX_CONCURRENT_STREAMS],
         tasks: &mut [Option<H::Future<'b>>; MAX_CONCURRENT_STREAMS],
-        mut shutdown: Pin<&mut S>,
     ) -> Poll<Result<(), ServeError<IoError<T>>>>
     where
         T: AsyncRead + AsyncWrite<Error = <T as AsyncRead>::Error> + Unpin,
         H: Handler,
-        S: Future<Output = GoAway>,
     {
         for _ in 0..MAX_ROUNDS {
-            match self.round(cx, io, handler, boxes, tasks, shutdown.as_mut()) {
+            match self.round(cx, io, handler, boxes, tasks) {
                 Err(e) => return Poll::Ready(Err(e)),
                 Ok(false) => return Poll::Pending,
                 Ok(true) => {}
@@ -287,36 +242,25 @@ impl State {
         Poll::Pending
     }
 
-    /// Eén ronde: lezen, frames verwerken, stoppen als dat gevraagd is,
-    /// handlers pollen, brievenbussen legen, schrijven. Geeft of er iets
-    /// veranderde.
-    fn round<'b, T, H, S>(
+    /// Eén ronde: lezen, frames verwerken, handlers pollen, brievenbussen
+    /// legen, schrijven. Geeft of er iets veranderde.
+    fn round<'b, T, H>(
         &mut self,
         cx: &mut Context<'_>,
         io: &mut T,
         handler: &mut H,
         boxes: &'b [Mailbox; MAX_CONCURRENT_STREAMS],
         tasks: &mut [Option<H::Future<'b>>; MAX_CONCURRENT_STREAMS],
-        shutdown: Pin<&mut S>,
     ) -> Result<bool, ServeError<IoError<T>>>
     where
         T: AsyncRead + AsyncWrite<Error = <T as AsyncRead>::Error> + Unpin,
         H: Handler,
-        S: Future<Output = GoAway>,
     {
         let mut progress = false;
         if self.out.len() - self.out_pos < OUT_HIGH {
             progress |= self.fill(cx, io)?;
         }
         progress |= self.parse(handler, boxes, tasks)?;
-        if self.started
-            && !self.shutdown_done
-            && let Poll::Ready(g) = shutdown.poll(cx)
-        {
-            self.shutdown_done = true;
-            self.go_away(g)?;
-            progress = true;
-        }
         for (i, slot) in tasks.iter_mut().enumerate() {
             let Some(f) = slot else { continue };
             if let Poll::Ready(r) = Pin::new(f).poll(cx) {
@@ -438,18 +382,6 @@ impl State {
         self.recv_win += i64::from(CONNECTION_WINDOW_INCREMENT);
         self.started = true;
         Ok(())
-    }
-
-    /// Stuurt onze GOAWAY met de hoogste geaccepteerde stream.
-    fn go_away(&mut self, g: GoAway) -> Result {
-        self.going_away = true;
-        let mut body = Vec::new();
-        body.try_reserve(8 + g.reason.len())
-            .map_err(|_| Error::OutOfMemory)?;
-        body.extend_from_slice(&(self.last_stream_id & 0x7fff_ffff).to_be_bytes());
-        body.extend_from_slice(&g.code.to_be_bytes());
-        body.extend_from_slice(g.reason.as_bytes());
-        self.frame(FRAME_GOAWAY, 0, 0, &body)
     }
 
     /// Verwerkt één frame van de peer.
@@ -657,9 +589,6 @@ impl State {
         if flags & FLAG_PRIORITY != 0 {
             // Het prioriteitsveld wordt gelezen en genegeerd.
             block = block.get(5..).ok_or(Error::HeadersPriorityMalformed)?;
-        }
-        if self.going_away {
-            return Err(Error::StreamAfterGoAway);
         }
         if stream.is_multiple_of(2) {
             return Err(Error::NotClientInitiated { stream });

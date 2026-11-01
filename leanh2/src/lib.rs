@@ -79,7 +79,7 @@ use core::fmt;
 use core::pin::Pin;
 use core::task::{Context, Poll};
 
-pub use conn::{Conn, GoAway};
+pub use conn::Conn;
 pub use hpack::HpackError;
 pub use stream::{Body, Handler, Request, RequestError, Response};
 
@@ -279,8 +279,6 @@ pub enum Error {
     PadLengthMissing,
     /// Opvulling voorbij het einde van het frame.
     PaddingBeyondFrame,
-    /// Een nieuwe stream na onze GOAWAY.
-    StreamAfterGoAway,
     /// Een even stream-id.
     NotClientInitiated {
         /// De stream.
@@ -432,11 +430,6 @@ pub enum Error {
     HeadersAlreadySent,
     /// Body voor HEAD, 204, 205 of 304.
     BodylessResponse,
-    /// Een GOAWAY-reden langer dan in één frame past.
-    GoAwayReasonTooLong {
-        /// De lengte.
-        len: usize,
-    },
 }
 
 impl fmt::Display for Error {
@@ -493,7 +486,6 @@ impl fmt::Display for Error {
             Self::HeadersPriorityMalformed => f.write_str("malformed HEADERS priority"),
             Self::PadLengthMissing => f.write_str("padded frame without a pad length"),
             Self::PaddingBeyondFrame => f.write_str("padding beyond the frame"),
-            Self::StreamAfterGoAway => f.write_str("the peer opened a stream after GOAWAY"),
             Self::NotClientInitiated { stream } => {
                 write!(f, "stream {stream} is not client-initiated")
             }
@@ -572,11 +564,6 @@ impl fmt::Display for Error {
             ),
             Self::HeadersAlreadySent => f.write_str("headers already sent"),
             Self::BodylessResponse => f.write_str("this response status or method has no body"),
-            Self::GoAwayReasonTooLong { len } => write!(
-                f,
-                "GOAWAY reason is {len} bytes, maximum is {}",
-                OUR_MAX_FRAME - 8
-            ),
         }
     }
 }
