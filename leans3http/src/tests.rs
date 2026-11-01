@@ -234,6 +234,77 @@ fn streamed_put_sends_its_body_after_continue() {
     assert!(written.ends_with(&payload));
 }
 
+/// Een klok die onthoudt waarop gewacht wordt; alleen een slaap van precies
+/// `.1` eindigt, de rest nooit.
+#[derive(Clone, Default)]
+struct Only(Rc<RefCell<Vec<Duration>>>, Duration);
+
+impl Clock for Only {
+    fn now(&self) -> Duration {
+        Duration::from_secs(100)
+    }
+    fn sleep(&self, duration: Duration) -> impl Future<Output = ()> {
+        self.0.borrow_mut().push(duration);
+        let fire = duration == self.1;
+        core::future::poll_fn(move |_| if fire { Poll::Ready(()) } else { Poll::Pending })
+    }
+}
+
+/// Een bron die om de beurt "nog niet" zegt, zoals een trage schijf.
+struct Slow<'a>(&'a [u8], bool);
+
+impl leans3::AsyncRead for Slow<'_> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<Result<usize, IoError>> {
+        self.1 = !self.1;
+        if self.1 {
+            cx.waker().wake_by_ref();
+            return Poll::Pending;
+        }
+        let n = buf.len().min(self.0.len());
+        buf[..n].copy_from_slice(&self.0[..n]);
+        self.0 = &self.0[n..];
+        Poll::Ready(Ok(n))
+    }
+}
+
+/// F7: de totaaltermijn loopt tot het oordeel; daarna staat de upload onder
+/// de voortgangstermijn per stuk, en de kop onder zijn eigen termijn.
+#[test]
+fn a_streamed_put_moves_from_deadline_to_progress_to_header() {
+    // Na de 100 zwijgt de server: alleen de koptermijn mag dat beëindigen.
+    let net = net(vec![vec![
+        Turn::Answer(b"HTTP/1.1 100 Continue\r\n\r\n"),
+        Turn::Hang,
+    ]]);
+    let clock = Only(Rc::default(), Duration::from_secs(9));
+    let mut http = Http::new(net, clock.clone());
+    http.limits = Limits {
+        deadline: Duration::from_secs(60),
+        progress: Duration::from_secs(7),
+        header: Duration::from_secs(9),
+    };
+    let payload = vec![7u8; 100_000];
+    let mut source = Slow(&payload, false);
+    let err = block_on(client().put_from(
+        &mut http,
+        "big",
+        &mut source,
+        payload.len() as u64,
+        &"ab".repeat(32),
+        &leans3::PutOptions::default(),
+    ))
+    .unwrap_err();
+    assert!(matches!(err, leans3::Error::Transport { .. }), "{err:?}");
+    let waits: Vec<u64> = clock.0.borrow().iter().map(Duration::as_secs).collect();
+    assert_eq!(waits.first(), Some(&60), "{waits:?}");
+    assert_eq!(waits.last(), Some(&9), "{waits:?}");
+    assert!(waits.contains(&7), "{waits:?}");
+}
+
 /// Een bron uit het geheugen.
 struct Source<'a>(&'a [u8]);
 

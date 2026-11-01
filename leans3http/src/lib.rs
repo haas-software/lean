@@ -37,7 +37,7 @@ use alloc::boxed::Box;
 use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::cell::RefCell;
+use core::cell::{Cell, RefCell};
 use core::future::{Future, poll_fn};
 use core::pin::{Pin, pin};
 use core::task::{Context, Poll};
@@ -152,7 +152,11 @@ impl<D: Dial, K: Clock + Clone> Http<D, K> {
         }
     }
 
-    /// Het verzoek tot en met de kop, binnen [`Limits::deadline`].
+    /// Het verzoek tot en met de kop. [`Limits::deadline`] loopt tot het
+    /// oordeel; een gestroomde upload staat daarna onder
+    /// [`Limits::progress`] per stuk, en de kop erna onder
+    /// [`Limits::header`] (F7: een upload die gestaag vordert, mag langer
+    /// duren dan de totaaltermijn).
     async fn attempt(
         &mut self,
         request: &Parts<'_>,
@@ -165,10 +169,18 @@ impl<D: Dial, K: Clock + Clone> Http<D, K> {
         for item in request.headers {
             header.set(item.name, &item.value)?;
         }
-        let (body_reader, body_len) = match upload {
-            Some((upload, len)) => (Some(upload as &mut dyn leanhttp::AsyncRead), len),
-            None => (None, 0),
+        let (body_reader, body_len, step) = match upload {
+            Some((upload, len)) => {
+                let step = upload.step;
+                (
+                    Some(upload as &mut dyn leanhttp::AsyncRead),
+                    len,
+                    Some(step),
+                )
+            }
+            None => (None, 0, None),
         };
+        let limits = self.limits;
         let call = Call {
             method: request.method,
             url: request.url,
@@ -184,6 +196,11 @@ impl<D: Dial, K: Clock + Clone> Http<D, K> {
         poll_fn(|cx| {
             if let Poll::Ready(result) = attempt.as_mut().poll(cx) {
                 return Poll::Ready(result);
+            }
+            match step.map(|s| s.replace(Step::Quiet)) {
+                Some(Step::Moved) => sleep.set(self.clock.sleep(limits.progress)),
+                Some(Step::Done) => sleep.set(self.clock.sleep(limits.header)),
+                _ => {}
             }
             match sleep.as_mut().poll(cx) {
                 // Het verzoek valt en sluit zijn verbinding.
@@ -233,10 +250,21 @@ impl<D: Dial, K: Clock + Clone + Unpin> leans3::Transport for Http<D, K> {
             .try_reserve_exact(request.target.len())
             .map_err(|_| IoError::Other("leans3http: out of memory"))?;
         target.push_str(request.target);
+        let step = Cell::new(Step::Quiet);
         let (bytes, mut upload) = match request.body {
             Body::None => (None, None),
             Body::Bytes(bytes) => (Some(bytes), None),
-            Body::Stream { source, len } => (None, Some((Upload(source), len))),
+            Body::Stream { source, len } => (
+                None,
+                Some((
+                    Upload {
+                        source,
+                        left: len,
+                        step: &step,
+                    },
+                    len,
+                )),
+            ),
         };
         let parts = Parts {
             method: request.method,
@@ -270,8 +298,25 @@ impl<D: Dial, K: Clock + Clone + Unpin> leans3::Transport for Http<D, K> {
     }
 }
 
-/// Een gestroomde PUT-body van leans3 als leanhttp-bron.
-struct Upload<'s>(&'s mut (dyn leans3::AsyncRead + Unpin));
+/// Waar een gestroomde upload staat, voor de termijn van `attempt`.
+#[derive(Clone, Copy)]
+enum Step {
+    /// Niets nieuws sinds de vorige blik.
+    Quiet,
+    /// Er is een stuk gelezen, dus het vorige is geschreven: voortgang.
+    Moved,
+    /// Het laatste stuk is gelezen; nu wacht het verzoek op de kop.
+    Done,
+}
+
+/// Een gestroomde PUT-body van leans3 als leanhttp-bron. leanhttp leest een
+/// stuk pas als het vorige geschreven is; elke read meldt dus voortgang.
+struct Upload<'s> {
+    source: &'s mut (dyn leans3::AsyncRead + Unpin),
+    /// Bytes die nog moeten.
+    left: u64,
+    step: &'s Cell<Step>,
+}
 
 impl leanhttp::AsyncRead for Upload<'_> {
     fn poll_read(
@@ -279,13 +324,22 @@ impl leanhttp::AsyncRead for Upload<'_> {
         cx: &mut Context<'_>,
         buf: &mut [u8],
     ) -> Poll<core::result::Result<usize, leanhttp::IoError>> {
-        Pin::new(&mut *self.0)
+        let r = Pin::new(&mut *self.source)
             .poll_read(cx, buf)
             .map_err(|e| match e {
                 IoError::TimedOut => leanhttp::IoError::TimedOut,
                 IoError::Closed => leanhttp::IoError::Closed,
                 _ => leanhttp::IoError::Other,
-            })
+            });
+        if let Poll::Ready(Ok(n)) = r {
+            self.left = self.left.saturating_sub(n as u64);
+            self.step.set(if self.left == 0 {
+                Step::Done
+            } else {
+                Step::Moved
+            });
+        }
+        r
     }
 }
 
