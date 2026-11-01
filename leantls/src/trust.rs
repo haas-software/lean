@@ -117,6 +117,11 @@ pub trait VerifyPeer {
     /// De handtekeningcodes (RFC 8446 §4.2.3) die deze verificatie kan
     /// controleren. Leeg betekent alleen Ed25519. Bied nooit iets aan dat
     /// [`VerifyPeer::verify_signature`] niet kan: de server kiest hieruit.
+    ///
+    /// Met `Versions::Tls13OrTls12` (feature `tls12`) zet de
+    /// client er `rsa_pkcs1_sha256` (0x0401) achter, voor een TLS
+    /// 1.2-server; een verificatie die RSA-sleutels aanneemt, moet die dan
+    /// ook kunnen controleren ([`crate::ChainVerifier`] kan het).
     fn signature_algorithms(&self) -> &[u16];
 
     /// Controleert de keten tegen `server_name`. Een fout weigert de peer.
@@ -124,6 +129,11 @@ pub trait VerifyPeer {
 
     /// Controleert de CertificateVerify: `alg` is de gekozen code, `signed`
     /// de exacte invoer, `sig` de handtekening, `leaf` het blad uit de keten.
+    ///
+    /// In de TLS 1.2-terugval is dit de ServerKeyExchange: `signed` is dan
+    /// `client_random || server_random || ServerECDHParams` (RFC 8422 §5.4),
+    /// en `alg` kan ook `rsa_pkcs1_sha256` (0x0401) zijn. Een TLS
+    /// 1.3-CertificateVerify met PKCS#1 v1.5 weigert de handshake zelf.
     fn verify_signature(&self, leaf: &[u8], alg: u16, signed: &[u8], sig: &[u8]) -> Result;
 }
 
@@ -147,13 +157,37 @@ pub enum Trust<'a> {
     Chain(&'a dyn VerifyPeer),
 }
 
-/// De willekeur die één handshake verbruikt: 32 bytes X25519-sleutel, 32
-/// bytes ClientHello.random en 32 bytes sessie-id.
+/// De willekeur die één handshake verbruikt, [`Entropy::LEN`] bytes:
+///
+/// | bytes | wat |
+/// | --- | --- |
+/// | `[0..32]` | X25519-sleutel |
+/// | `[32..64]` | ClientHello.random |
+/// | `[64..96]` | sessie-id |
+/// | `[96..128]` | P-256-scalar (het tweede sleuteldeel, voor servers zonder X25519; sinds 3.1.14) |
+/// | `[128..160]` | het zout voor [`ClientIdentity::sign`](crate::ClientIdentity::sign) bij clientauthenticatie (07-10-2026) |
+///
+/// In de TLS 1.2-terugval (07-10-2026) dienen dezelfde bytes: de scalar van
+/// de groep die de server kiest wordt de efemere ECDHE-sleutel (de server
+/// gebruikte het sleuteldeel uit de ClientHello niet, dus hij wordt één keer
+/// gebruikt), en de sessie-id is willekeurig, zodat geen server hem als
+/// hervatting kan lezen.
+///
+/// Ook zonder clientidentiteit is hij 160 bytes: één vaste maat, zodat
+/// een aanroeper niet hoeft te weten of de server om een certificaat vraagt.
 ///
 /// De crate heeft geen eigen bron (geen std, geen afhankelijkheden); de
 /// aanroeper vult hem uit leanrand of de hardware. [`connect`](crate::connect)
 /// neemt hem over als waarde, zodat hij niet twee keer gebruikt kan worden,
 /// en hij wist zichzelf bij het opruimen.
+///
+/// # Examples
+///
+/// ```
+/// let e = leantls::Entropy::new([0x5a; leantls::Entropy::LEN]);
+/// assert_eq!(leantls::Entropy::LEN, 160);
+/// # drop(e);
+/// ```
 pub struct Entropy {
     /// De bytes.
     pub(crate) bytes: [u8; Entropy::LEN],
@@ -161,9 +195,9 @@ pub struct Entropy {
 
 impl Entropy {
     /// Aantal bytes dat een handshake nodig heeft.
-    pub const LEN: usize = 96;
+    pub const LEN: usize = 160;
 
-    /// Neemt 96 willekeurige bytes over.
+    /// Neemt [`Entropy::LEN`] willekeurige bytes over.
     pub const fn new(bytes: [u8; Self::LEN]) -> Self {
         Self { bytes }
     }

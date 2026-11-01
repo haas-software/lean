@@ -462,11 +462,25 @@ fn certificate_verify_signatures() {
             "{alg:#06x}"
         );
     }
-    // rsa_pkcs1_sha256 is in een TLS 1.3-handshake verboden.
+    // rsa_pkcs1_sha256 (0x0401) staat niet in de lijst die TLS 1.3 aanbiedt
+    // (daar is hij verboden), maar verifieert wel: de ServerKeyExchange van
+    // de TLS 1.2-terugval mag ermee getekend zijn. De handshake van 1.3
+    // weigert hem zelf voordat hij hier komt.
+    let pkcs1 = include_bytes!("../../testdata/chain/cv-rsa-pkcs1.sig");
+    assert_eq!(v.verify_signature(RSA_LEAF, 0x0401, msg, pkcs1), Ok(()));
     assert_eq!(
         v.verify_signature(RSA_LEAF, 0x0401, msg, pss),
-        Err(Error::X509(X509Error::Algorithm(0x0401)))
+        Err(Error::BadSignature)
     );
+    assert_eq!(
+        v.verify_signature(RSA_LEAF, 0x0804, msg, pkcs1),
+        Err(Error::BadSignature)
+    );
+    assert_eq!(
+        v.verify_signature(ECDSA_LEAF, 0x0401, msg, pkcs1),
+        Err(Error::X509(X509Error::KeyMismatch(0x0401)))
+    );
+    assert!(!SIGNATURE_ALGORITHMS.contains(&0x0401));
     assert_eq!(v.signature_algorithms(), &SIGNATURE_ALGORITHMS);
 }
 

@@ -126,3 +126,6 @@ printf 'leantls certificate verify' > cv.msg
 openssl dgst -sha256 -sign ecdsa-leaf.key -out cv-ecdsa.sig cv.msg
 openssl dgst -sha256 -sign rsa-leaf.key -sigopt rsa_padding_mode:pss \
     -sigopt rsa_pss_saltlen:digest -out cv-rsa-pss.sig cv.msg
+# PKCS#1 v1.5/SHA-256 (0x0401), voor de ServerKeyExchange van TLS 1.2
+# (07-10-2026, OpenSSL 3.6.4).
+openssl dgst -sha256 -sign rsa-leaf.key -out cv-rsa-pkcs1.sig cv.msg

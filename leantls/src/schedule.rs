@@ -143,8 +143,17 @@ impl TrafficKeys {
     }
 }
 
+/// Lengte van de vaste IV van TLS 1.2-GCM (RFC 5288 §3, `salt`).
+#[cfg(feature = "tls12")]
+pub(crate) const FIXED_IV_LEN: usize = 4;
+
 /// Eén richting van de recordlaag: sleutels, AEAD en de recordteller die na
 /// elke sleutelwissel opnieuw bij nul begint.
+///
+/// Twee vormen, per richting vast vanaf de sleutelwissel: TLS 1.3
+/// (TLSInnerPlaintext, impliciete nonce) of de TLS 1.2-terugval (RFC 5288:
+/// expliciete nonce van 8 bytes in het record, het echte type in de header,
+/// AAD met recordnummer, type, versie en klaartekstlengte).
 pub(crate) struct Direction {
     /// De sleutels.
     pub(crate) keys: TrafficKeys,
@@ -152,13 +161,46 @@ pub(crate) struct Direction {
     pub(crate) aead: Gcm,
     /// Het volgende recordnummer.
     pub(crate) seq: u64,
+    /// De recordvorm van TLS 1.2 in plaats van die van 1.3.
+    #[cfg(feature = "tls12")]
+    pub(crate) tls12: bool,
 }
 
 impl Direction {
     /// Installeert sleutels met teller nul.
     pub(crate) fn new(keys: TrafficKeys) -> Self {
         let aead = Gcm::new(&keys.key);
-        Self { keys, aead, seq: 0 }
+        Self {
+            keys,
+            aead,
+            seq: 0,
+            #[cfg(feature = "tls12")]
+            tls12: false,
+        }
+    }
+
+    /// Installeert TLS 1.2-sleutels uit het key block (RFC 5246 §6.3, RFC
+    /// 5288 §3) met teller nul, zoals bij elke ChangeCipherSpec.
+    ///
+    /// De IV is `fixed_iv || 0^64`: [`Direction::next_nonce`] geeft dan
+    /// `fixed_iv || seq`, precies de nonce met het recordnummer als
+    /// expliciet deel die deze client schrijft. Het geheim bestaat in 1.2
+    /// niet (Finished komt uit het master secret) en blijft nul.
+    #[cfg(feature = "tls12")]
+    pub(crate) fn tls12(key: &[u8; KEY_LEN], fixed_iv: &[u8; FIXED_IV_LEN]) -> Self {
+        let mut keys = TrafficKeys {
+            secret: Secret([0; HASH_LEN]),
+            key: *key,
+            iv: [0; IV_LEN],
+        };
+        keys.iv[..FIXED_IV_LEN].copy_from_slice(fixed_iv);
+        let aead = Gcm::new(&keys.key);
+        Self {
+            keys,
+            aead,
+            seq: 0,
+            tls12: true,
+        }
     }
 
     /// De nonce voor het huidige record, en schuift de teller door.
@@ -178,21 +220,36 @@ pub(crate) fn finished_data(base: &Secret, transcript: &[u8; HASH_LEN]) -> Resul
     Ok(m.finish())
 }
 
-/// Lengte van de CertificateVerify-invoer van de server.
+/// Lengte van de CertificateVerify-invoer; de twee contextstrings zijn
+/// even lang.
 pub(crate) const CERT_VERIFY_LEN: usize = 64 + SERVER_CONTEXT.len() + 1 + HASH_LEN;
 
 /// De contextstring voor de server.
 const SERVER_CONTEXT: &[u8] = b"TLS 1.3, server CertificateVerify";
 
-/// De CertificateVerify-invoer van §4.4.3: 64 spaties, de context, een nul
-/// en de transcript-hash. Die opbouw scheidt de handtekening van elk ander
-/// protocol dat dezelfde sleutel gebruikt. Alleen de serverkant: deze client
-/// tekent niets.
+/// De contextstring voor de client (clientauthenticatie).
+const CLIENT_CONTEXT: &[u8; SERVER_CONTEXT.len()] = b"TLS 1.3, client CertificateVerify";
+
+/// De CertificateVerify-invoer van §4.4.3 voor de server: 64 spaties, de
+/// context, een nul en de transcript-hash. Die opbouw scheidt de
+/// handtekening van elk ander protocol dat dezelfde sleutel gebruikt.
 pub(crate) fn cert_verify_content(transcript: &[u8; HASH_LEN]) -> [u8; CERT_VERIFY_LEN] {
+    content(SERVER_CONTEXT, transcript)
+}
+
+/// Als [`cert_verify_content`], met het clientlabel: wat de client tekent
+/// als de server om een certificaat vroeg. Het andere label maakt dat een
+/// handtekening van de ene rol nooit als die van de andere geldt.
+pub(crate) fn client_cert_verify_content(transcript: &[u8; HASH_LEN]) -> [u8; CERT_VERIFY_LEN] {
+    content(CLIENT_CONTEXT, transcript)
+}
+
+/// De gedeelde opbouw van §4.4.3.
+fn content(context: &[u8], transcript: &[u8; HASH_LEN]) -> [u8; CERT_VERIFY_LEN] {
     let mut out = [0x20u8; CERT_VERIFY_LEN];
-    out[64..64 + SERVER_CONTEXT.len()].copy_from_slice(SERVER_CONTEXT);
-    out[64 + SERVER_CONTEXT.len()] = 0;
-    out[64 + SERVER_CONTEXT.len() + 1..].copy_from_slice(transcript);
+    out[64..64 + context.len()].copy_from_slice(context);
+    out[64 + context.len()] = 0;
+    out[64 + context.len() + 1..].copy_from_slice(transcript);
     out
 }
 

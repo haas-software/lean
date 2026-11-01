@@ -108,6 +108,8 @@ where
         let mut raw = self.inner.dial(target).await?;
         raw.set_read_timeout(Some(self.handshake))?;
         raw.set_write_timeout(Some(self.handshake))?;
+        // Het publieke web krijgt alleen TLS 1.3; de terugval naar 1.2 is
+        // voor een eigen netwerk met een eigen CA (TlsDial::with_tls12).
         let options = Options::new().alpn(self.alpn);
         let mut conn = match wrap(raw, &Trust::Chain(&verifier), host, entropy, &options).await {
             Ok(conn) => conn,

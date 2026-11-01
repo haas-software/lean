@@ -163,6 +163,65 @@ fn server_name_weigert() {
     assert!(matches!(d.last_error(), Some(Error::Tls(_))));
 }
 
+// Met een vaste naam gaat de TCP naar de dial-host en SNI over de naam: de
+// RavenDB-nodes achter een Tailscale-bridge (07-10-2026).
+#[test]
+fn vaste_servernaam_wint_van_de_dial_host() {
+    let bridge = "bridge-cluster01-server01.taila53b9f.ts.net";
+    let name = "database-cluster01-server01.production.svc.cluster.local";
+    let mut d = TlsDial::new(Tcp::default(), pinned(), entropy).with_server_name(name);
+    assert!(block_on(d.dial(target(bridge))).is_err());
+    assert_eq!(
+        d.inner.dials,
+        [(bridge.to_owned(), 443)],
+        "TCP naar de bridge"
+    );
+    let hello = d.inner.written[0].borrow().clone();
+    assert!(contains(&hello, name.as_bytes()), "SNI is de vaste naam");
+    assert!(
+        !contains(&hello, bridge.as_bytes()),
+        "de dial-host ging mee in SNI"
+    );
+
+    // Een keten met een vaste naam mag ook naar een IP.
+    let chain = AnyChain;
+    let mut d = TlsDial::new(Tcp::default(), Trust::Chain(&chain), entropy).with_server_name(name);
+    let _ = block_on(d.dial(target("100.64.0.7")));
+    assert_eq!(d.inner.dials.len(), 1);
+    assert_ne!(d.last_error(), Some(Error::ChainWithoutName));
+}
+
+/// Een identiteit zonder keten: leantls weigert hem voordat er iets over de
+/// lijn gaat, en dat bewijst dat de dialer de identiteit meegeeft.
+struct NoChain;
+
+impl leantls::ClientIdentity for NoChain {
+    fn certificates(&self) -> &[Vec<u8>] {
+        &[]
+    }
+    fn signature_schemes(&self) -> &[u16] {
+        &[0x0804]
+    }
+    fn sign(&self, _: u16, _: &[u8], _: [u8; 32]) -> leantls::Result<Vec<u8>> {
+        Ok(Vec::new())
+    }
+}
+
+#[test]
+fn identiteit_gaat_mee_in_de_handshake() {
+    let id = NoChain;
+    let mut d = TlsDial::new(Tcp::default(), pinned(), entropy).with_identity(&id);
+    assert!(block_on(d.dial(target("raven.example"))).is_err());
+    assert!(matches!(
+        d.last_error(),
+        Some(Error::Tls(leantls::Error::ClientIdentity(_)))
+    ));
+    assert!(
+        d.inner.written[0].borrow().is_empty(),
+        "er ging iets de lijn op"
+    );
+}
+
 #[test]
 fn ip_zonder_pin() {
     let chain = AnyChain;
@@ -510,4 +569,60 @@ fn alpn_choice_is_visible_on_the_connection() {
     assert_eq!(conn.alpn(), Some(b"http/1.1".as_slice()));
     assert_eq!(Link::Tls(conn).alpn(), Some(b"http/1.1".as_slice()));
     assert_eq!(Link::Plain(Near(Rc::default())).alpn(), None);
+}
+
+/// De suites van de ClientHello in de eerste dial: alles tussen de
+/// sessie-id en de compressie.
+#[cfg(feature = "tls12")]
+fn suites(hello: &[u8]) -> Vec<u8> {
+    // Record (5), type en lengte (4), versie (2), random (32), sessie-id.
+    let sid = 5 + 4 + 2 + 32;
+    let at = sid + 1 + usize::from(hello[sid]);
+    let n = usize::from(u16::from_be_bytes([hello[at], hello[at + 1]]));
+    hello[at + 2..at + 2 + n].to_vec()
+}
+
+// Met `with_tls12` biedt de ClientHello ook TLS 1.2 aan (de twee
+// ECDHE-GCM-suites en 0x0303 in supported_versions), voor de RavenDB-nodes op
+// macOS (07-10-2026); zonder blijft hij precies 1.3. Met een pin weigert de
+// dial voordat er iets over de lijn gaat.
+#[cfg(feature = "tls12")]
+#[test]
+fn tls12_alleen_op_verzoek() {
+    let chain = AnyChain;
+    let name = "raven.example";
+    let mut d = TlsDial::new(Tcp::default(), Trust::Chain(&chain), entropy);
+    assert!(block_on(d.dial(target(name))).is_err());
+    let hello = d.inner.written[0].borrow().clone();
+    assert_eq!(suites(&hello), [0x13, 0x01]);
+    assert!(!contains(&hello, &[0, 43, 0, 5, 4, 3, 4, 3, 3]));
+
+    let mut d = TlsDial::new(Tcp::default(), Trust::Chain(&chain), entropy).with_tls12();
+    assert!(block_on(d.dial(target(name))).is_err());
+    let hello = d.inner.written[0].borrow().clone();
+    assert_eq!(suites(&hello), [0x13, 0x01, 0xc0, 0x2f, 0xc0, 0x2b]);
+    assert!(
+        contains(&hello, &[0, 43, 0, 5, 4, 3, 4, 3, 3]),
+        "supported_versions noemt 1.2 niet"
+    );
+    assert!(
+        contains(&hello, &[0, 23, 0, 0]),
+        "geen extended_master_secret"
+    );
+    // De handshake eindigde op het einde van de stroom, niet op de keuze.
+    assert!(matches!(
+        d.last_error(),
+        Some(Error::Tls(leantls::Error::Eof))
+    ));
+
+    let mut d = TlsDial::new(Tcp::default(), pinned(), entropy).with_tls12();
+    assert!(block_on(d.dial(target(name))).is_err());
+    assert!(matches!(
+        d.last_error(),
+        Some(Error::Tls(leantls::Error::Tls12(_)))
+    ));
+    assert!(
+        d.inner.written[0].borrow().is_empty(),
+        "er ging iets de lijn op"
+    );
 }

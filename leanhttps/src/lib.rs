@@ -10,7 +10,7 @@
 //!    ketenverificatie) gaat ongewijzigd naar leantls. Een [`Trust`] heeft geen
 //!    standaardwaarde, dus "geen model" compileert niet, en omdat hij geleend
 //!    wordt kan de dialer hem niet muteren.
-//! 3. leanhttp roept de dialer per verzoek aan; [`TlsDial::is_encrypted`] is
+//! 3. leanhttp roept de dialer per verzoek aan; [`leanhttp::Dial::is_encrypted`] is
 //!    waar, en alleen dan staat leanhttp `https://` toe.
 //!
 //! leanhttp zelf linkt geen TLS; deze crate is de enige plek waar ze elkaar
@@ -22,7 +22,7 @@
 //!
 //! ```no_run
 //! # use leanhttps::TlsDial;
-//! # fn demo<D: leanhttp::Dial<Conn: Unpin>>(tcp: D, key: [u8; 32], seed: fn() -> [u8; 96]) {
+//! # fn demo<D: leanhttp::Dial<Conn: Unpin>>(tcp: D, key: [u8; 32], seed: fn() -> [u8; leantls::Entropy::LEN]) {
 //! let trust = leantls::Trust::Pinned(leantls::PeerKey::new(key));
 //! let mut https = TlsDial::new(tcp, trust, move || leantls::Entropy::new(seed()));
 //! // leanhttp::get(&mut https, "https://leader.internal/v1/jobs")
@@ -33,7 +33,7 @@
 //! Een dialer zonder vertrouwensmodel bestaat niet:
 //!
 //! ```compile_fail
-//! # fn demo<D: leanhttp::Dial<Conn: Unpin>>(tcp: D, seed: [u8; 96]) {
+//! # fn demo<D: leanhttp::Dial<Conn: Unpin>>(tcp: D, seed: [u8; leantls::Entropy::LEN]) {
 //! let https = leanhttps::TlsDial::new(tcp, leantls::Trust::default(), move || {
 //!     leantls::Entropy::new(seed)
 //! });
@@ -59,7 +59,9 @@ use core::task::{Context, Poll};
 use core::time::Duration;
 
 use leanhttp::{Close, IoError, Target};
-use leantls::{ConnError, Entropy, Options, Trust};
+#[cfg(feature = "tls12")]
+use leantls::Versions;
+use leantls::{ClientIdentity, ConnError, Entropy, Options, Trust};
 
 /// Hoe lang een close_notify mag duren voordat het transport toch dichtgaat.
 /// Een peer die niet meer leest, mag het sluiten niet gijzelen; de Go-versie
@@ -108,8 +110,14 @@ impl fmt::Display for Error {
 
 /// Een [`leanhttp::Dial`] die elke verbinding van `inner` in TLS verpakt.
 ///
-/// `entropy` levert per handshake 96 verse willekeurige bytes (uit leanrand
-/// of de hardware); deze crate heeft geen eigen bron.
+/// `entropy` levert per handshake [`Entropy::LEN`] verse willekeurige bytes
+/// (uit leanrand of de hardware); deze crate heeft geen eigen bron.
+///
+/// Met [`TlsDial::with_identity`] bewijst de dialer zich met een
+/// clientcertificaat als de server erom vraagt, met
+/// [`TlsDial::with_server_name`] gaan SNI en ketenverificatie over een vaste
+/// naam in plaats van de dial-host, en met `TlsDial::with_tls12` (feature
+/// `tls12`) mag een server die alleen TLS 1.2 kent ook.
 pub struct TlsDial<'t, D, R> {
     /// De dialer die kale verbindingen maakt.
     inner: D,
@@ -117,8 +125,11 @@ pub struct TlsDial<'t, D, R> {
     trust: Trust<'t>,
     /// De bron van handshake-willekeur.
     entropy: R,
-    /// Het ALPN-aanbod per handshake; leeg is geen aanbod.
-    alpn: &'t [&'t [u8]],
+    /// Wat elke handshake vraagt: ALPN, een clientcertificaat en (met de
+    /// feature `tls12`) de versies.
+    options: Options<'t>,
+    /// Een vaste naam voor SNI en ketenverificatie in plaats van de dial-host.
+    server_name: Option<&'t str>,
     /// De reden van de laatst mislukte dial, met meer detail dan leanhttp's
     /// fouttype heeft.
     last_error: Option<Error>,
@@ -136,7 +147,8 @@ where
             inner,
             trust,
             entropy,
-            alpn: &[],
+            options: Options::new(),
+            server_name: None,
             last_error: None,
         }
     }
@@ -146,7 +158,47 @@ where
     /// HTTP/1.1: wie zelf `h2` aanbiedt, dialt zelf en geeft de verbinding
     /// aan een HTTP/2-client zoals `leanh2::client`.
     pub fn with_alpn(mut self, protocols: &'t [&'t [u8]]) -> Self {
-        self.alpn = protocols;
+        self.options = self.options.alpn(protocols);
+        self
+    }
+
+    /// Bewijst elke verbinding met `identity` als de server om een
+    /// clientcertificaat vraagt (via [`Options::identity`]). Zonder deze
+    /// aanroep gaat er dan een lege Certificate en beslist de server.
+    pub fn with_identity(mut self, identity: &'t dyn ClientIdentity) -> Self {
+        self.options = self.options.identity(identity);
+        self
+    }
+
+    /// Gebruikt `name` voor SNI en ketenverificatie in plaats van de host van
+    /// het dial-doel; de TCP-verbinding gaat nog steeds naar die host.
+    ///
+    /// Voor een node achter een doorgeefluik: gemeten 07-10-2026 worden de
+    /// RavenDB-nodes via een Tailscale-bridge bereikt
+    /// (`bridge-cluster01-server01.taila53b9f.ts.net:10101`), maar hun
+    /// certificaat draagt `*.production.svc.cluster.local`. Meet verbindt
+    /// dus met de bridge en verifieert als
+    /// `database-cluster01-server01.production.svc.cluster.local`. Geldt
+    /// voor elke dial, ook na een redirect naar een andere host.
+    pub fn with_server_name(mut self, name: &'t str) -> Self {
+        self.server_name = Some(name);
+        self
+    }
+
+    /// Laat ook TLS 1.2 toe, voor een server die geen TLS 1.3 kent
+    /// ([`leantls::Versions::Tls13OrTls12`]): alleen ECDHE met AES-128-GCM,
+    /// met verplicht `extended_master_secret`, de downgrade-bescherming van
+    /// TLS 1.3, en zonder hervatting of renegotiatie.
+    ///
+    /// Alleen voor een eigen netwerk met een eigen CA, en alleen met
+    /// [`Trust::Chain`]: met een pin weigert elke dial, want de pin bestaat
+    /// alleen voor TLS 1.3. Gemeten 07-10-2026 spreken de RavenDB-nodes op
+    /// macOS (`bridge-cluster03-server01.taila53b9f.ts.net:10301`) alleen
+    /// TLS 1.2; Meet zet dit dus voor die nodes. [`WebDial`] zet het nooit:
+    /// het publieke web spreekt TLS 1.3.
+    #[cfg(feature = "tls12")]
+    pub fn with_tls12(mut self) -> Self {
+        self.options = self.options.versions(Versions::Tls13OrTls12);
         self
     }
 
@@ -168,14 +220,15 @@ where
     /// dial-host van deze hop.
     async fn dial(&mut self, target: Target<'_>) -> leanhttp::Result<TlsConn<D::Conn>> {
         let host = target.host.strip_suffix('.').unwrap_or(target.host);
+        // Een vaste naam wint van de dial-host, voor SNI én keten.
+        let name = self.server_name.unwrap_or(host);
         // Een keten heeft een naam nodig; een pin levert de identiteit zelf.
-        if matches!(self.trust, Trust::Chain(_)) && is_ip(host) {
+        if matches!(self.trust, Trust::Chain(_)) && is_ip(name) {
             self.last_error = Some(Error::ChainWithoutName);
             return Err(leanhttp::Error::NoHost);
         }
         let raw = self.inner.dial(target).await?;
-        let options = Options::new().alpn(self.alpn);
-        match wrap(raw, &self.trust, host, (self.entropy)(), &options).await {
+        match wrap(raw, &self.trust, name, (self.entropy)(), &self.options).await {
             Ok(conn) => {
                 self.last_error = None;
                 Ok(conn)
@@ -388,7 +441,8 @@ impl<C: leanhttp::Conn + Unpin> Close for TlsConn<C> {
     }
 }
 
-/// De handshake op een kale verbinding, met SNI `host`.
+/// De handshake op een kale verbinding, met SNI `host` en `options` (ALPN,
+/// clientcertificaat, versies).
 async fn wrap<C: leanhttp::Conn + Unpin>(
     raw: C,
     trust: &Trust<'_>,

@@ -17,6 +17,8 @@ leantls = { path = "../leantls", features = ["mozilla-roots"] }
 [features]
 # `leantls::MOZILLA_ROOTS` voor een gewone webclient (WebDial).
 mozilla-roots = ["leantls/mozilla-roots"]
+# De TLS 1.2-terugval van leantls voor `TlsDial::with_tls12`.
+tls12 = ["leantls/tls12"]
 
 [lints]
 workspace = true

@@ -53,9 +53,12 @@ pub enum Error {
         /// Het ontvangen type.
         got: u8,
     },
-    /// De server vraagt om een clientcertificaat. Wordt niet meer gegeven:
-    /// de client antwoordt met een leeg certificaat en de server beslist.
-    ClientAuthRequested,
+    /// De clientidentiteit is onbruikbaar: een lege keten, een leeg
+    /// certificaat, of een blad dat niet bij de sleutel hoort.
+    ClientIdentity(&'static str),
+    /// Een privésleutel is onleesbaar of inconsistent (`n` is geen `p·q`,
+    /// een CRT-waarde buiten bereik), of een handtekening verifieerde niet.
+    PrivateKey(&'static str),
     /// De server stuurde een HelloRetryRequest.
     HelloRetryRequest,
     /// De server echode een andere sessie-id.
@@ -66,8 +69,25 @@ pub enum Error {
     Compression(u8),
     /// De server koos een andere versie.
     Version(u16),
-    /// De ServerHello mist `supported_versions`.
+    /// De ServerHello mist `supported_versions`: een TLS 1.2-server, en de
+    /// terugval (feature `tls12`, `Versions::Tls13OrTls12`) staat uit.
     NotTls13,
+    /// De server koos TLS 1.2 terwijl zijn random het downgrade-teken van
+    /// RFC 8446 §4.1.3 draagt (`DOWNGRD\x01` of `\x00`): hij kent 1.3, dus
+    /// iemand ertussen heeft de ClientHello veranderd.
+    #[cfg(feature = "tls12")]
+    Downgrade,
+    /// De server koos TLS 1.2 zonder `extended_master_secret` (RFC 7627):
+    /// zonder die binding is de sessie vatbaar voor triple handshake.
+    #[cfg(feature = "tls12")]
+    NoExtendedMasterSecret,
+    /// De server wil renegotiëren: een niet-lege `renegotiation_info` of een
+    /// HelloRequest na de handshake. Deze client renegotieert nooit.
+    #[cfg(feature = "tls12")]
+    Renegotiation,
+    /// Een TLS 1.2-handshake die deze client weigert; de tekst zegt waarom.
+    #[cfg(feature = "tls12")]
+    Tls12(&'static str),
     /// De server koos een andere groep.
     Group(u16),
     /// De ServerHello mist een sleuteldeel.
@@ -85,7 +105,9 @@ pub enum Error {
         /// De pin.
         want: [u8; 32],
     },
-    /// De server tekende met een algoritme dat hier niet mag.
+    /// Een handtekeningalgoritme dat hier niet mag: een peer tekende met
+    /// iets anders dan aangeboden, of de server noemt in zijn
+    /// CertificateRequest niet het schema van onze clientidentiteit.
     SignatureAlgorithm(u16),
     /// De CertificateVerify-handtekening klopt niet.
     BadSignature,
@@ -185,9 +207,10 @@ pub(crate) fn alert_name(code: u8) -> &'static str {
         70 => "protocol_version",
         71 => "insufficient_security",
         80 => "internal_error",
-        120 => "no_application_protocol",
         109 => "missing_extension",
         112 => "unrecognized_name",
+        116 => "certificate_required",
+        120 => "no_application_protocol",
         _ => "unnamed",
     }
 }
@@ -231,34 +254,58 @@ impl fmt::Display for Error {
             Error::UnexpectedMessage { want, got } => {
                 write!(f, "expected handshake type {want}, got {got}")
             }
-            Error::ClientAuthRequested => f.write_str(
-                "the server asks for a client certificate - this package does not do client \
-                 authentication",
-            ),
+            Error::ClientIdentity(why) => write!(f, "client identity rejected: {why}"),
+            Error::PrivateKey(why) => write!(f, "private key rejected: {why}"),
             Error::HelloRetryRequest => f.write_str(
                 "the server sent a HelloRetryRequest - it wants a key exchange group other than \
-                 X25519, which is the only one this package offers",
+                 X25519 and P-256, the two this package offers, or a cookie",
             ),
             Error::SessionIdMismatch => f.write_str("the server echoed a different session id"),
             Error::CipherSuite(s) => write!(
                 f,
                 "the server chose cipher suite {s:#06x}; this package only has \
-                 TLS_AES_128_GCM_SHA256 (0x1301)"
+                 TLS_AES_128_GCM_SHA256 (0x1301), and with TLS 1.2 allowed \
+                 TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 (0xc02f) and \
+                 TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256 (0xc02b)"
             ),
             Error::Compression(c) => write!(
                 f,
-                "the server selected compression method {c}; TLS 1.3 has none"
+                "the server selected compression method {c}; this package has none"
             ),
-            Error::Version(v) => {
-                write!(f, "the server selected version {v:#06x}, not TLS 1.3")
-            }
+            Error::Version(v) => write!(
+                f,
+                "the server selected version {v:#06x}, not TLS 1.3 (or TLS 1.2 when allowed)"
+            ),
+            #[cfg(not(feature = "tls12"))]
             Error::NotTls13 => f.write_str(
                 "the server did not select TLS 1.3 (no supported_versions in ServerHello) - this \
                  package speaks TLS 1.3 only",
             ),
-            Error::Group(g) => write!(f, "the server chose group {g:#06x}, not X25519"),
+            #[cfg(feature = "tls12")]
+            Error::NotTls13 => f.write_str(
+                "the server did not select TLS 1.3 (no supported_versions in ServerHello) - this \
+                 package speaks TLS 1.2 only when asked to (Versions::Tls13OrTls12)",
+            ),
+            #[cfg(feature = "tls12")]
+            Error::Downgrade => f.write_str(
+                "the server chose TLS 1.2 but its random carries the TLS 1.3 downgrade sentinel \
+                 (RFC 8446 4.1.3) - someone in between removed TLS 1.3 from the handshake",
+            ),
+            #[cfg(feature = "tls12")]
+            Error::NoExtendedMasterSecret => f.write_str(
+                "the server chose TLS 1.2 without extended_master_secret (RFC 7627); this \
+                 package requires it",
+            ),
+            #[cfg(feature = "tls12")]
+            Error::Renegotiation => f.write_str(
+                "the server asked for renegotiation (renegotiation_info or HelloRequest); this \
+                 package never renegotiates",
+            ),
+            #[cfg(feature = "tls12")]
+            Error::Tls12(why) => write!(f, "TLS 1.2: {why}"),
+            Error::Group(g) => write!(f, "the server chose group {g:#06x}, not X25519 or P-256"),
             Error::NoKeyShare => f.write_str("the server sent no key share"),
-            Error::KeyShare => f.write_str("server key share: invalid X25519 value"),
+            Error::KeyShare => f.write_str("server key share: invalid value for its group"),
             Error::EmptyCertificate => {
                 f.write_str("the server sent an empty certificate in its chain")
             }
@@ -271,8 +318,9 @@ impl fmt::Display for Error {
             ),
             Error::SignatureAlgorithm(a) => write!(
                 f,
-                "the server signed with algorithm {a:#06x}; a pinned Ed25519 peer must sign \
-                 with Ed25519 (0x0807)"
+                "signature algorithm {a:#06x} is not acceptable to both sides: a peer signs with \
+                 a scheme the other offered (a pinned Ed25519 peer with Ed25519, 0x0807), and a \
+                 server that asks for a client certificate must accept its scheme"
             ),
             Error::BadSignature => {
                 f.write_str("the server's CertificateVerify signature is invalid")

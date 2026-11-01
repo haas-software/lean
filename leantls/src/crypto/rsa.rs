@@ -33,7 +33,7 @@ const MAX_BYTES: usize = MAX_BITS / 8;
 const MAX_E: u64 = 0xffff_ffff;
 
 /// De DigestInfo-voorvoegsels van RFC 8017 §9.2 noot 1, met de NULL-parameter.
-const DIGEST_INFO_SHA256: [u8; 19] = [
+pub(crate) const DIGEST_INFO_SHA256: [u8; 19] = [
     0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01, 0x05,
     0x00, 0x04, 0x20,
 ];
@@ -85,8 +85,18 @@ impl PublicKey {
     }
 
     /// Lengte van de modulus in bytes.
-    fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.bits.div_ceil(8)
+    }
+
+    /// Aantal bits van de modulus.
+    pub(crate) fn bits(&self) -> usize {
+        self.bits
+    }
+
+    /// Of `o` dezelfde sleutel is: zelfde modulus en exponent.
+    pub(crate) fn same_key(&self, o: &PublicKey) -> bool {
+        self.n.modulus() == o.n.modulus() && self.e == o.e
     }
 
     /// `sig^e mod n` in `out[..k]`, met de controles van RSAVP1: de
@@ -190,8 +200,9 @@ fn pss_check(m: &[u8], em_bits: usize, hash: HashAlg, digest: &[u8]) -> Option<b
     Some(h2.as_slice() == h)
 }
 
-/// `out ^= MGF1(seed)` over de lengte van `out`.
-fn mgf1_xor(hash: HashAlg, seed: &[u8], out: &mut [u8]) {
+/// `out ^= MGF1(seed)` over de lengte van `out`; ook voor het tekenen in
+/// [`super::rsakey`].
+pub(crate) fn mgf1_xor(hash: HashAlg, seed: &[u8], out: &mut [u8]) {
     for (counter, chunk) in (0u32..).zip(out.chunks_mut(hash.digest_len())) {
         let mask = hash.digest(&[seed, &counter.to_be_bytes()]);
         for (o, m) in chunk.iter_mut().zip(mask.as_slice()) {

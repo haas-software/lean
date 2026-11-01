@@ -27,13 +27,21 @@ use crate::wire::Reader;
 pub(crate) const HS_NEW_SESSION_TICKET: u8 = 4;
 /// Handshake-berichttype KeyUpdate.
 pub(crate) const HS_KEY_UPDATE: u8 = 24;
+/// Handshake-berichttype HelloRequest (TLS 1.2): de server vraagt om
+/// renegotiatie.
+#[cfg(feature = "tls12")]
+pub(crate) const HS_HELLO_REQUEST: u8 = 0;
 
 /// Een TLS 1.3-verbinding over transport `T`, gemaakt door
-/// [`connect`](crate::connect).
+/// [`connect`](crate::connect); met de feature `tls12`,
+/// `Versions::Tls13OrTls12` en een server die alleen 1.2 kent, een TLS
+/// 1.2-verbinding (`Conn::is_tls12`).
 ///
 /// Leest en schrijft applicatiedata via [`AsyncRead`] en [`AsyncWrite`], en
-/// handelt NewSessionTicket en KeyUpdate van de server stil af. Sleutels en
-/// geheimen worden gewist als de verbinding wegvalt.
+/// handelt NewSessionTicket en KeyUpdate van de server stil af. In TLS 1.2
+/// bestaat na de handshake geen enkel handshakebericht: een HelloRequest
+/// (renegotiatie) is `Error::Renegotiation` en sluit de leesrichting.
+/// Sleutels en geheimen worden gewist als de verbinding wegvalt.
 pub struct Conn<T> {
     /// Het transport.
     pub(crate) io: T,
@@ -127,6 +135,14 @@ impl<T> Conn<T> {
         self.alpn.as_deref()
     }
 
+    /// Of deze verbinding TLS 1.2 spreekt: alleen mogelijk met de feature
+    /// `tls12`, [`Versions::Tls13OrTls12`](crate::Versions::Tls13OrTls12) en
+    /// een server die geen 1.3 kent.
+    #[cfg(feature = "tls12")]
+    pub fn is_tls12(&self) -> bool {
+        self.read.as_ref().is_some_and(|d| d.tls12)
+    }
+
     /// Het transport, bijvoorbeeld om zijn bulk-classificatie te lezen (de
     /// Go-versie gaf `Grown` door).
     pub fn get_ref(&self) -> &T {
@@ -210,6 +226,17 @@ where
             let typ = r.u8()?;
             let mut body = r.vec24()?;
             let consumed = (end - pos) - r.rest().len();
+            // TLS 1.2 kent na de handshake alleen nog renegotiatie (een
+            // HelloRequest) of berichten die wij nooit vroegen; geen van
+            // beide doen we (RFC 5746 maakt renegotiatie niet veiliger dan
+            // geen renegotiatie).
+            #[cfg(feature = "tls12")]
+            if self.is_tls12() {
+                return Err(match typ {
+                    HS_HELLO_REQUEST => Error::Renegotiation,
+                    other => Error::PostHandshake(other),
+                });
+            }
             match typ {
                 // Hervatting bestaat hier niet, maar tickets sturen mag.
                 HS_NEW_SESSION_TICKET if !self.server => {}

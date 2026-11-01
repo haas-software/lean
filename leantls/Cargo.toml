@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "TLS 1.3 voor een netwerk dat je bezit: een versie, een suite, een gepinde Ed25519-peer of een echte keten."
+description = "TLS 1.3 voor een netwerk dat je bezit: een versie, een suite, een gepinde Ed25519-peer of een echte keten; TLS 1.2 alleen met de feature tls12, en dan op verzoek."
 
 [dependencies]
 leancrypto = { path = "../leancrypto" }
@@ -13,6 +13,10 @@ leancrypto = { path = "../leancrypto" }
 [features]
 # De Mozilla NSS-wortels (`MOZILLA_ROOTS`) meelinken.
 mozilla-roots = []
+# De TLS 1.2-terugval (`Versions::Tls13OrTls12`) voor een eigen netwerk met
+# een server die geen 1.3 kent (RavenDB op macOS, 07-10-2026). Zonder deze
+# feature is leantls één versie, zonder downgrade, en linkt het geen 1.2.
+tls12 = []
 
 [lints]
 workspace = true

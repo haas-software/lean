@@ -464,7 +464,7 @@ fn subject_alt_name(value: &[u8]) -> ParseResult<&[u8]> {
     Ok(seq.body)
 }
 
-/// AuthorityKeyIdentifier ::= SEQUENCE { keyIdentifier [0] OPTIONAL, ... }.
+/// AuthorityKeyIdentifier ::= SEQUENCE { keyIdentifier \[0\] OPTIONAL, ... }.
 fn authority_key_id(value: &[u8]) -> ParseResult<Option<&[u8]>> {
     let seq = der::single(value, SEQUENCE).field("authorityKeyIdentifier")?;
     let mut d = Der::new(seq.body);

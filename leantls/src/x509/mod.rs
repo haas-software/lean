@@ -30,7 +30,7 @@
 //! op de CommonName.
 
 mod cert;
-mod der;
+pub(crate) mod der;
 mod name;
 
 #[cfg(test)]
@@ -67,7 +67,12 @@ pub const MAX_SIGNATURE_CHECKS: usize = 32;
 /// kan controleren, goedkoopste eerst. De server kiest hieruit.
 ///
 /// PKCS#1 v1.5 staat er niet in: TLS 1.3 verbiedt het in CertificateVerify.
-/// In certificaten zelf wordt het wel geaccepteerd.
+/// In certificaten zelf wordt het wel geaccepteerd, en
+/// [`VerifyPeer::verify_signature`] controleert `rsa_pkcs1_sha256`
+/// ([`RSA_PKCS1_SHA256`], 0x0401) ook, voor de ServerKeyExchange van de
+/// TLS 1.2-terugval: die biedt de client alleen met
+/// `Versions::Tls13OrTls12` (feature `tls12`) aan, achter
+/// deze lijst.
 pub const SIGNATURE_ALGORITHMS: [u16; 6] = [
     ECDSA_P256_SHA256,
     ECDSA_P384_SHA384,
@@ -77,6 +82,8 @@ pub const SIGNATURE_ALGORITHMS: [u16; 6] = [
     crate::handshake::SIG_ED25519,
 ];
 
+/// rsa_pkcs1_sha256 (RFC 5246 §7.4.1.4.1): alleen TLS 1.2.
+pub const RSA_PKCS1_SHA256: u16 = 0x0401;
 /// ecdsa_secp256r1_sha256.
 const ECDSA_P256_SHA256: u16 = 0x0403;
 /// ecdsa_secp384r1_sha384.
@@ -719,16 +726,34 @@ impl VerifyPeer for ChainVerifier<'_> {
                 })?;
                 k.verify_pss(h, h.digest(&[signed]).as_slice(), sig)
             }
+            (RSA_PKCS1_SHA256, PublicKey::Rsa { n, e }) => {
+                let k = rsa::PublicKey::new(n, e).ok_or(X509Error::Unsupported {
+                    cert: CertRef::Chain(0),
+                    what: "RSA key (size outside 2048-4096 bits or bad exponent)",
+                })?;
+                let h = HashAlg::Sha256;
+                k.verify_pkcs1(h, h.digest(&[signed]).as_slice(), sig)
+            }
             (crate::handshake::SIG_ED25519, PublicKey::Ed25519(k)) => {
                 let sig: &[u8; 64] = sig.try_into().map_err(|_| Error::BadSignature)?;
                 ed25519::verify(k, signed, sig)
             }
-            (a, _) if SIGNATURE_ALGORITHMS.contains(&a) => {
+            (a, _) if SIGNATURE_ALGORITHMS.contains(&a) || a == RSA_PKCS1_SHA256 => {
                 return Err(X509Error::KeyMismatch(a).into());
             }
             (a, _) => return Err(X509Error::Algorithm(a).into()),
         };
         if ok { Ok(()) } else { Err(Error::BadSignature) }
+    }
+}
+
+/// De RSA-sleutel uit een certificaat, om een eigen privésleutel aan het
+/// eigen blad te binden ([`crate::RsaIdentity`]). `None` als het geen
+/// leesbaar certificaat met een RSA-sleutel van 2048 tot 4096 bits is.
+pub(crate) fn rsa_public_key(cert: &[u8]) -> Option<rsa::PublicKey> {
+    match Cert::parse(cert).ok()?.public_key().ok()? {
+        PublicKey::Rsa { n, e } => rsa::PublicKey::new(n, e),
+        _ => None,
     }
 }
 

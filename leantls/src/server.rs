@@ -3,12 +3,12 @@
 //! De transport-eigenaar begrenst de handshaketijd door `accept` te annuleren.
 //! Geen applicatiebytes worden vrijgegeven voordat de client-Finished klopt.
 //!
-//! De privésleutel blijft bij de aanroeper: [`Identity`] levert de keten en
+//! De privésleutel blijft bij de aanroeper: [`Identity`](crate::server::Identity) levert de keten en
 //! tekent de CertificateVerify, zodat deze crate zonder externe crates kan
 //! (de verificatiekant hier is publiek en mag variabele tijd hebben; een
 //! geheime sleutel hoort in een constant-time ondertekenaar van de
 //! aanroeper). Sleuteluitwisseling is X25519, en P-256 als de identiteit dat
-//! via [`Identity::agree_p256`] aanbiedt. De serverrol kwam uit Stulp
+//! via [`Identity::agree_p256`](crate::server::Identity::agree_p256) aanbiedt. De serverrol kwam uit Stulp
 //! (03-10), dat hem tot dan in een eigen kopie van deze crate droeg.
 use crate::crypto::ct::Secret;
 use crate::{
@@ -443,7 +443,9 @@ where
     drop(private);
     let sh = server_hello(&ch, &entropy.bytes[32..64], &share)?;
     let mut signing_seed = Secret::new([0u8; 32]);
-    signing_seed.copy_from_slice(&entropy.bytes[64..]);
+    // De server gebruikt 96 van de 160 bytes; de P-256-scalar en het zout
+    // van de client heeft hij niet nodig.
+    signing_seed.copy_from_slice(&entropy.bytes[64..96]);
     drop(entropy);
     conn.consume(len);
     conn.require_boundary()?;

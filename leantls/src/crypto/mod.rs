@@ -2,6 +2,8 @@
 //!
 //! `TLS_AES_128_GCM_SHA256` met X25519 en Ed25519 vraagt: SHA-256, HMAC en
 //! HKDF daarover, AES-128-GCM, X25519, en voor Ed25519-verificatie SHA-512.
+//! P-256 ECDH ([`p256`]) is de tweede sleuteluitwisseling, voor servers die
+//! geen X25519 kennen.
 //! Elke primitieve is getest tegen de officiële vectoren (RFC 6234, 4231,
 //! 5869, 7748, 8032, FIPS 197 en de GCM-specificatie).
 //!
@@ -9,10 +11,19 @@
 //! ECDSA-verificatie op P-256 en P-384, en RSA-verificatie (PKCS#1 v1.5 en
 //! PSS) op een eigen bignum van vaste maat. Die raken alleen publieke data.
 //!
+//! Voor clientauthenticatie ([`crate::connect_as`]) tekent [`rsakey`] met
+//! RSA-PSS en een privésleutel, op het constant-time Montgomery-rekenen van
+//! [`ctnum`]; voor de TLS 1.2-terugval (07-10-2026) ook met PKCS#1 v1.5,
+//! met dezelfde RSASP1. De PRF van TLS 1.2 (P_SHA256) is HMAC-SHA256 en
+//! staat in `tls12`.
+//!
 //! Wat constant-time is en wat niet:
 //!
-//! - constant-time: AES (geen tabel), GHASH, X25519-ladder en het veld,
-//!   HMAC, het vergelijken van tags en Finished-MAC's, het wissen;
+//! - constant-time: AES (geen tabel), GHASH, X25519-ladder en het veld, de
+//!   P-256-ladder van [`p256`] (de tweede sleuteluitwisseling), HMAC, het
+//!   vergelijken van tags en Finished-MAC's, het wissen, en RSASP1 met CRT
+//!   in [`rsakey`] via [`ctnum`] (gemaskeerde aftrekkingen, een vast
+//!   venster van 4 bits, een tabelopzoeking die alle 16 elementen leest);
 //! - variabele tijd, bewust: Ed25519-verificatie (alleen publieke sleutel,
 //!   bericht en handtekening), de reductie modulo L daarin, en de codering
 //!   van veldelementen die alleen op publieke punten wordt gebruikt;
@@ -22,10 +33,13 @@
 
 pub(crate) use leancrypto::{ct, gcm, hash, hmac, sha256, sha512};
 pub(crate) mod bignum;
+pub(crate) mod ctnum;
 pub(crate) mod ecdsa;
 pub(crate) mod ed25519;
 pub(crate) mod field;
+pub(crate) mod p256;
 pub(crate) mod rsa;
+pub(crate) mod rsakey;
 pub(crate) mod x25519;
 
 #[cfg(test)]
