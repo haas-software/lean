@@ -70,6 +70,7 @@ Herhalingen krijgen in §10 een van drie labels:
 11. Te wegen: fouten en kandidaten
 12. Docs en commentaar die achterlopen
 13. Het voorstel: wachten, bellen, hard falen, LEAN
+14. Wat geen gebruiker heeft (L8, 01-11)
 
 ---
 
@@ -1667,3 +1668,115 @@ loopt vol). Per fase krijgt elke agent zijn eigen crate.
 
 Deel 3 (HOP) neemt S19 en de docs van de consumenten (hostnet en
 agentd-hopos over het bufferen van leans3http) mee.
+
+---
+
+## 14. Wat geen gebruiker heeft (L8, 01-11)
+
+Besluit L8: eerst de lijst, Derek ziet hem vóór er iets weggaat. Er is
+**niets** weggehaald. Gemeten tegen master na de commits van 01-11 (tot en
+met 1d0c835), in de zes gebruikers: HopOS, Hop, Stulp, Spin, Meet en
+Replica. Niet meegeteld: `target/`, `OLD/`, `vendor/` en de lean-kopieën in
+`spin/third-party/rust/lean*`; de kopie van HopOS-applib daar telt wel (hij
+gebruikt niets wat het origineel niet al gebruikt). Elke "dood" is twee keer
+gezocht. Regels zijn code zonder commentaar en lege regels (de `strip` van
+`hop-os/tools/loc.py`, per item).
+
+- **dood**: alleen de eigen toetsen van lean gebruiken het;
+- **toets X**: alleen een toets van gebruiker X;
+- **intern**: publiek zonder gebruiker, maar de crate heeft het zelf nodig.
+  Weghalen uit de publieke API scheelt dan geen code; alleen `pub` kan weg.
+
+### 14.1 Dood
+
+| Crate | Item | Waar | Regels |
+| --- | --- | --- | --- |
+| leanrand | `read`, `bytes`, `hex`, `id`, `fill_id`, `Error`, `Result` | `leanrand/src/lib.rs` 94-225 | 74 |
+| leanelf | `PT_NULL`, `MACHINE_X86_64`, `MACHINE_RISCV` | `leanelf/src/lib.rs` 58-69 | 3 |
+| leanelf | `File::at_paddr`, `read_at_paddr`, `lookup`, `lookup_into` | `leanelf/src/lib.rs` 406-498 | 72 |
+| leandhcp | `Client::receive_failed`, `Keeper::state`, `Instant::from_millis` | `client.rs`, `keeper.rs`, `time.rs` | 16 |
+| leancookie | `Jar::new`, `len`, `is_empty`, `rejected` (Stulp gebruikt `with_policy`) | `leancookie/src/lib.rs` 363-394 | 14 |
+| leannet | `Stack::close`, `is_closed`, `tcp_grown`, `ETHERNET_HEADER_SIZE` | `stack.rs` 33, 518, 568; `socket.rs` 407 | 56 |
+| leannet | `wire::put_udp`, `put_tcp`, `Arp::target_hw`, `Ipv4::ttl`, `TcpFlags::NONE` | `leannet/src/wire.rs` | 26 |
+| leanhttp | `Response::encoding`, `is_chunked`, `is_complete` | `leanhttp/src/client.rs` 193-203 | 9 |
+| leanhttp | `Pool::close_idle`, `finish_now`, `idle_count`; `Client::get` | `leanhttp/src/pool.rs` 149-231 | 27 |
+| leanhttp | `pub mod status` (21 constanten, ook intern ongebruikt) | `leanhttp/src/lib.rs` 158 | 23 |
+| leanhttp | `Mux::dispatch` (gebruikers roepen `find`) | `leanhttp/src/mux.rs` 209 | 14 |
+| leanhttp | `Exchange::done`, `Exchange::redirect` (Hop gebruikt `claim_done`, `reader_gone`) | `leanhttp/src/server.rs` 860, 949 | 20 |
+| leanhttp | `host::TcpConn::socket` | `leanhttp/src/host.rs` 89 | 3 |
+| leantls | `Conn::peer_key`, `PeerKey::from_slice` | `conn.rs` 128; `trust.rs` 31 | 11 |
+| leanhttps | `TlsDial::with_alpn`, `TlsConn::alpn`, `Link::alpn` (Stulp dialt APNs zelf) | `lib.rs` 160, 337; `web.rs` 134 | 16 |
+| leans3http | `Http::dialer` | `leans3http/src/lib.rs` 139 | 3 |
+| leanh2 | `Conn::into_inner`, `Body::close`, `client::Response::get` | `conn.rs` 76; `stream.rs` 188; `client.rs` 104 | 18 |
+
+Samen ongeveer **405** regels. Daarbij twijfel: `leanhttp::Header::is_empty`
+en `leantls::Roots::is_empty` (algemene namen, geen treffer op dat type).
+
+### 14.2 Alleen in een toets van een gebruiker
+
+| Item | Waar | Regels | Toets |
+| --- | --- | --- | --- |
+| `leans3::Client::url_for`, `Url` met `is_https`, `host`, `path` | `leans3/src/lib.rs` 418-509 | 24 | Hop `runner/src/host/tests/download.rs` |
+| `leantls::Conn::close_notify` | `leantls/src/conn.rs` 357 | 3 | Stulp `transport/key.rs` (Stulp gebruikt verder `poll_close_notify`) |
+| `leantls::Roots::len` | `leantls/src/x509/mod.rs` 338 | 3 | Hop `cloudflared-lean/edge.rs` |
+
+### 14.3 Nieuw, of alleen via een feature
+
+| Item | Stand |
+| --- | --- |
+| `leannet::Stack::abort_peer` (15 regels) | nieuw (L7), wacht op de stopreeks van HopOS |
+| feature `tls12` van leantls en leanhttps (`tls12.rs` 527 regels, plus de `cfg`-plekken) | Meet roept `with_tls12` aan, maar zet de feature nog niet aan: zie §14.6 |
+| `leantls::Versions`, `Options::versions` | alleen via `leanhttps::TlsDial::with_tls12` (Meet) |
+
+### 14.4 Publiek, intern nodig (alleen `pub` kan weg)
+
+De grootste: leannet `pub mod wire` (437) en `wire6` (136), leancrypto `aes`
+(479, voor `gcm`), leanrand `next_u64` en `below` (via `jitter`), leandhcp
+`State`, `Timers`, `Lease::timers`, `FRAME_LEN`, leannet `MTU`, `MS`, `SEC`,
+`ArpStats`, `NdpStats`, leanhttp `Pool::new/take/put/finish/sweep/idle_for`,
+`Hijacked`, `PatternError` en de termijnconstanten, leantls `CertChain`,
+`CertIter`, `RsaKey::sign_*`, de x509-grenzen, `X509Error`, leanhttps `Wire`
+en `CLOSE_NOTIFY_TIMEOUT`, leans3 `Url::target`, `Op`, `XmlError`,
+`MAX_BUFFERED_GET`, leans3http `Observer`, leanh2 `HpackError`,
+`RequestError` en `MAX_CONCURRENT_STREAMS`. Samen ongeveer 1450 regels die
+blijven, ook als `pub` weggaat.
+
+Alleen via een andere lean-crate gebruikt: leancrypto via leantls (`gcm`,
+`hash`, `sha512`, `hmac::extract`/`expand`, `ct::Secret`), leanhttp via
+leans3http (`Pool::put_now`, `Response::into_reusable`), leantls via
+leanhttps (`ClientIdentity`, `Options::identity`, `Conn::into_inner`,
+`poll_flush`).
+
+### 14.5 Wat wel gebruikt wordt, ter controle
+
+`leantls::server::Identity::agree_p256` en `offers_p256`: Stulp implementeert
+ze (`transport/src/key.rs`), dus S11 is geen dode code. `TlsDial` naast
+`WebDial`: beide gebruikt (Hop, Meet). leanrand `Source` en `jitter`: Hop
+(`cloudflared-lean`). `leans3http::Http::last_error` en `observe`: Spin.
+`leanh2::client`: Stulp. De features `std`, `ipv6` en `mozilla-roots`: alle
+gebruikt.
+
+### 14.6 Wat de consumenten moeten doen na de commits van 01-11
+
+Niet in deze ronde gedaan (lean pint geen consumenten); per gebruiker:
+
+- **Meet**: in `Cargo.toml` `leanhttps` met `features = ["mozilla-roots",
+  "tls12"]` (anders bestaat `with_tls12` niet). Daarna kan de `[patch]` weg
+  zodra er een tag is.
+- **HopOS**: `Stack::new` krijgt 16 bytes geheim (`hopos/src/net.rs`
+  `iss_seed`, `applib/src/appnet.rs`); `tcp_connect` neemt een deadline
+  (`hopos/src/net.rs`: `Some(deadline)` wordt `deadline`; applib
+  `tcp_connect_until`: altijd een deadline, de oude standaard was 30 s);
+  `StackError::ConnectTimeout` bestaat niet meer (applib `appnet.rs`);
+  `Action::Bound(lease, since)` en `Keeper::new(mac, lease, since)`
+  (`hopos/src/net.rs`); `abort_peer` in de stopreeks van een slot (deel 1
+  §13.5); `leanhttp::Error::Connect` wordt `Dial` (applib `tcp::Dialer`).
+- **Hop**: `cloudflared-lean` roept `serve()` aan zonder argument en laat
+  `GoAway` vallen; `hostnet::s3_http` en `agentd-hopos` laten `attempts: 1`
+  vallen.
+- **Spin**: leans3http herhaalt niet meer; wie onder Bunny-last opnieuw wil
+  (429, 5xx, een gebroken verbinding), doet dat zelf, alleen voor GET en
+  HEAD, met een wachttijd.
+- **Stulp**, **Replica**: geen wijziging nodig voor deze commits, behalve de
+  pin.
+
