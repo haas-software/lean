@@ -73,9 +73,10 @@ const SELF_TEST: &[u8] = b"leantls RsaKey self-test";
 /// let der = include_bytes!("../../testdata/clientkey/rsa2048.pk8.der");
 /// let key = leantls::RsaKey::from_pkcs8_der(der).unwrap();
 /// assert_eq!(key.bits(), 2048);
-/// let sig = key.sign_pss_sha256(b"hallo", &[7; 32]).unwrap();
-/// assert_eq!(sig.len(), 256);
 /// ```
+///
+/// Tekenen doet de handdruk zelf, met de sleutel in een
+/// [`RsaIdentity`](crate::RsaIdentity).
 ///
 /// # Invariants
 ///
@@ -302,16 +303,6 @@ impl RsaKey {
     /// Deterministisch, zonder zout. Dezelfde RSASP1 als
     /// [`RsaKey::sign_pss_sha256`], en ook deze handtekening wordt voor het
     /// teruggeven met de publieke sleutel gecontroleerd.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// let der = include_bytes!("../../testdata/clientkey/rsa2048.pk8.der");
-    /// let key = leantls::RsaKey::from_pkcs8_der(der).unwrap();
-    /// let a = key.sign_pkcs1_sha256(b"hallo").unwrap();
-    /// assert_eq!(a, key.sign_pkcs1_sha256(b"hallo").unwrap());
-    /// assert_eq!(a.len(), 256);
-    /// ```
     #[cfg(feature = "tls12")]
     pub(crate) fn sign_pkcs1_sha256(&self, message: &[u8]) -> Result<Vec<u8>> {
         let k = self.public.len();
