@@ -98,17 +98,25 @@ fn is_arp(f: &[u8]) -> bool {
     wire::parse_eth(f).is_ok_and(|e| e.ether_type() == wire::ETHERTYPE_ARP)
 }
 
+/// Een geheim voor een teststack uit een klein getal, zodat elke toets zijn
+/// eigen, vaste ISS en poorten heeft.
+pub(crate) fn secret(n: u32) -> [u8; 16] {
+    let mut s = [0u8; 16];
+    s[..4].copy_from_slice(&n.to_le_bytes());
+    s
+}
+
 impl Net {
     /// Twee stacks zoals `newStackPair`.
     pub(crate) fn pair(budget_a: usize, budget_b: usize) -> Net {
-        let a = Stack::new(cfg_a(budget_a), 12345).unwrap();
-        let b = Stack::new(cfg_b(budget_b), 54321).unwrap();
+        let a = Stack::new(cfg_a(budget_a), secret(12345)).unwrap();
+        let b = Stack::new(cfg_b(budget_b), secret(54321)).unwrap();
         Net::with(a, Some(b))
     }
 
     /// Eén stack; alles wat hij stuurt belandt in `wire_a`.
     pub(crate) fn single(cfg: Config, seed: u32) -> Net {
-        Net::with(Stack::new(cfg, seed).unwrap(), None)
+        Net::with(Stack::new(cfg, secret(seed)).unwrap(), None)
     }
 
     /// Een net rond gegeven stacks.

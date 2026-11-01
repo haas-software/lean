@@ -289,13 +289,86 @@ fn stack_icmp_echo() {
 
 #[test]
 fn stack_ephemeral_skips_occupied() {
-    let mut net = Net::single(cfg_a(1 << 20), 0);
-    net.a.udp_bind(49153).unwrap();
-    let u1 = net.a.udp_bind(0).unwrap();
-    let u2 = net.a.udp_bind(0).unwrap();
-    let p1 = net.a.udp_local(u1).unwrap().port;
-    let p2 = net.a.udp_local(u2).unwrap().port;
-    assert_eq!((p1, p2), (49152, 49154), "49153 must be skipped");
+    // Twee stacks met hetzelfde geheim kiezen dezelfde eerste poort; is die
+    // bij de tweede bezet, dan neemt hij de volgende (rond na de laatste).
+    let mut one = Net::single(cfg_a(1 << 20), 0);
+    let u = one.a.udp_bind(0).unwrap();
+    let p = one.a.udp_local(u).unwrap().port;
+    let mut two = Net::single(cfg_a(1 << 20), 0);
+    two.a.udp_bind(p).unwrap();
+    let u = two.a.udp_bind(0).unwrap();
+    let want = if p == EPHEMERAL_END {
+        EPHEMERAL_BASE
+    } else {
+        p + 1
+    };
+    assert_eq!(two.a.udp_local(u).unwrap().port, want);
+}
+
+#[test]
+fn stack_ephemeral_is_not_in_order() {
+    // RFC 6056: de volgende poort volgt niet uit de vorige, en een ander
+    // geheim geeft een andere reeks.
+    let ports = |seed| {
+        let mut net = Net::single(cfg_a(1 << 20), seed);
+        (0..16)
+            .map(|_| {
+                let u = net.a.udp_bind(0).unwrap();
+                net.a.udp_local(u).unwrap().port
+            })
+            .collect::<Vec<u16>>()
+    };
+    let a = ports(1);
+    assert!(
+        a.iter()
+            .all(|p| (EPHEMERAL_BASE..=EPHEMERAL_END).contains(p))
+    );
+    let steps = a
+        .windows(2)
+        .filter(|w| w[1] == w[0].wrapping_add(1))
+        .count();
+    assert!(steps < 3, "op volgorde: {a:?}");
+    assert_ne!(a, ports(2));
+}
+
+#[test]
+fn iss_is_a_keyed_hash_of_the_tuple_plus_the_clock() {
+    use crate::stack::ConnKey;
+    let net = Net::single(cfg_a(1 << 20), 1);
+    let k = |lport, rport| ConnKey {
+        lport,
+        rip: IP_B,
+        rport,
+    };
+    // Hetzelfde tupel op hetzelfde moment: dezelfde ISS; 64 ns later één
+    // hoger (RFC 6528: M loopt met de klok).
+    let first = net.a.iss(k(50000, 80), 1_000_000);
+    assert_eq!(net.a.iss(k(50000, 80), 1_000_000), first);
+    assert_eq!(net.a.iss(k(50000, 80), 1_000_064), first.wrapping_add(1));
+    // Een ander tupel of een ander geheim: geen vaste afstand meer, zoals
+    // de oude stap van 64007 die er was.
+    let other = net.a.iss(k(50001, 80), 1_000_000);
+    assert_ne!(other.wrapping_sub(first), 64007);
+    assert_ne!(other, first);
+    let twin = Net::single(cfg_a(1 << 20), 2);
+    assert_ne!(twin.a.iss(k(50000, 80), 1_000_000), first);
+}
+
+#[test]
+fn siphash_matches_the_reference_vectors() {
+    // De vectoren van de referentie-implementatie: sleutel 00..0f,
+    // bericht 00, 01, ... van 0, 8 en 16 bytes.
+    let key = [0x0706_0504_0302_0100, 0x0f0e_0d0c_0b0a_0908];
+    let siphash = crate::stack::siphash;
+    assert_eq!(siphash(key, &[]), 0x726f_db47_dd0e_0e31);
+    assert_eq!(
+        siphash(key, &[0x0706_0504_0302_0100]),
+        0x93f5_f579_9a93_2462
+    );
+    assert_eq!(
+        siphash(key, &[0x0706_0504_0302_0100, 0x0f0e_0d0c_0b0a_0908]),
+        0x3f2a_cc7f_57c2_9bdb
+    );
 }
 
 #[test]
@@ -500,19 +573,6 @@ fn stack_budget_recovery() {
         false
     });
     assert!(recovered, "budget never recovered after close");
-}
-
-#[test]
-fn stack_ephemeral_wraps() {
-    let mut net = Net::single(cfg_a(1 << 20), 1);
-    net.a.next_eph = EPHEMERAL_END;
-    let u1 = net.a.udp_bind(0).unwrap();
-    let u2 = net.a.udp_bind(0).unwrap();
-    let p = (
-        net.a.udp_local(u1).unwrap().port,
-        net.a.udp_local(u2).unwrap().port,
-    );
-    assert_eq!(p, (EPHEMERAL_END, EPHEMERAL_BASE));
 }
 
 #[test]
@@ -873,9 +933,9 @@ fn stack_peer_herstart_zelfde_vier_tupel() {
     // De node gaat weg zonder RST: een gesloten stack pompt niets meer.
     net.a.close();
     net.run_for(50 * MS);
-    // Botst bewust in het dynamische poortbereik maar verandert de ISS: de
-    // regressie moet herstel van hetzelfde vier-tupel oefenen.
-    net.a = Stack::new(cfg_a(1 << 20), 12345 + 16384).unwrap();
+    // Hetzelfde geheim geeft dezelfde eerste poort, en de klok een andere
+    // ISS: de regressie moet herstel van hetzelfde vier-tupel oefenen.
+    net.a = Stack::new(cfg_a(1 << 20), secret(12345)).unwrap();
     let second =
         dial(&mut net, IP_B, 90, 10 * SEC).expect("herstarte peer kon niet opnieuw verbinden");
     assert_eq!(
@@ -1805,10 +1865,10 @@ fn gateway_seed_dekt_ook_de_gateway_zelf() {
             gw: IP_B,
             ..cfg_a(1 << 20)
         },
-        12345,
+        secret(12345),
     )
     .unwrap();
-    let b = Stack::new(cfg_b(1 << 20), 54321).unwrap();
+    let b = Stack::new(cfg_b(1 << 20), secret(54321)).unwrap();
     let mut net = Net::with(a, Some(b));
     net.a.seed_neighbor(IP_B, MAC_B, net.now).unwrap();
     let l = net.b().tcp_listen(80).unwrap();
@@ -1901,23 +1961,18 @@ fn stack_seeded_ephemeral_range_and_wrap() {
                 budget: 1 << 20,
                 ..Config::default()
             },
-            seed,
+            secret(seed),
         )
         .unwrap();
-        let mut pick = || s.ephemeral_port(|_, _| false).unwrap();
-        let first = pick();
-        assert_eq!(first, EPHEMERAL_BASE + (seed % 16384) as u16, "seed {seed}");
-        let mut seen = vec![false; 65536];
-        seen[usize::from(first)] = true;
-        for _ in 1..16384 {
-            let p = pick();
-            assert!(
-                p >= EPHEMERAL_BASE && !seen[usize::from(p)],
-                "seed {seed}: port {p} repeat/outside"
-            );
-            seen[usize::from(p)] = true;
+        for _ in 0..1000 {
+            let p = s.ephemeral_port(|_, _| false).unwrap();
+            assert!(p >= EPHEMERAL_BASE, "seed {seed}: port {p} outside");
         }
-        assert_eq!(pick(), first, "full cycle did not wrap");
+        // Alleen de eerste poort vrij: de zoektocht loopt rond na de laatste.
+        let p = s.ephemeral_port(|_, p| p != EPHEMERAL_BASE);
+        assert!(matches!(p, Ok(EPHEMERAL_BASE)), "seed {seed}: {p:?}");
+        let p = s.ephemeral_port(|_, _| true);
+        assert!(matches!(p, Err(Error::PortsInUse)), "seed {seed}: {p:?}");
     }
 }
 
@@ -1935,8 +1990,8 @@ fn jumbo_mss() {
         mtu: JUMBO,
         ..cfg
     };
-    let a = Stack::new(jumbo(cfg_a(0)), 1).unwrap();
-    let b = Stack::new(jumbo(cfg_b(0)), 2).unwrap();
+    let a = Stack::new(jumbo(cfg_a(0)), secret(1)).unwrap();
+    let b = Stack::new(jumbo(cfg_b(0)), secret(2)).unwrap();
     let mut net = Net::with(a, Some(b));
     let (c, s, _) = connected(&mut net, 80);
     let msg: Vec<u8> = (0..1 << 20).map(|i| (i * 7) as u8).collect();
@@ -1979,7 +2034,7 @@ fn stack_congestion_follows_trusted_route() {
             link_trusted: true,
             ..cfg_a(1 << 20)
         },
-        1,
+        secret(1),
     )
     .unwrap();
     for ip in [[10, 0, 0, 2], [192, 168, 1, 144]] {
@@ -2001,7 +2056,7 @@ fn stack_congestion_follows_trusted_route() {
 /// Een gewone begrensde RX-vloer: de verbinding start op de afgesproken maten.
 #[test]
 fn stack_conn_starts_at_floors() {
-    let mut s = Stack::new(cfg_a(1 << 20), 1).unwrap();
+    let mut s = Stack::new(cfg_a(1 << 20), secret(1)).unwrap();
     let i = s
         .new_conn(ConnKey {
             lport: 1,

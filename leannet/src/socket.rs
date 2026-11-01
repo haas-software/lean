@@ -213,7 +213,7 @@ impl Stack {
             rport: port,
         };
         let i = self.new_conn(key)?;
-        let iss = self.next_iss();
+        let iss = self.iss(key, now);
         let adv_mss = self.adv_mss(ip);
         let adv_ws = self.cfg.adv_ws;
         let c = self.conn_mut(i).ok_or(Error::Closed)?;

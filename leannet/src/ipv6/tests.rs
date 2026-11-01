@@ -1,10 +1,10 @@
 //! De Go-IPv6-regressies: draadgedrag, bronkeuze, leases en begrensde levensduur.
 use super::*;
-use crate::testnet::{MAC_A, MAC_B, cfg_a, cfg_b, counting_waker};
+use crate::testnet::{MAC_A, MAC_B, cfg_a, cfg_b, counting_waker, secret};
 const NOW: u64 = 100 * SEC;
 const GROUP: [u8; 16] = [255, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 251];
 fn stack() -> Stack {
-    Stack::new(cfg_a(1 << 20), 1).unwrap()
+    Stack::new(cfg_a(1 << 20), secret(1)).unwrap()
 }
 fn raw(
     src: [u8; 16],
@@ -101,7 +101,7 @@ fn disabled_lane_is_quiet_and_allocates_no_table() {
 #[test]
 fn ndp_two_stacks_udp_roundtrip_and_loopback() {
     let mut a = stack();
-    let mut b = Stack::new(cfg_b(1 << 20), 2).unwrap();
+    let mut b = Stack::new(cfg_b(1 << 20), secret(2)).unwrap();
     let ah = a.udp6_bind(1000, NOW).unwrap();
     let bh = b.udp6_bind(1000, NOW).unwrap();
     let to = Endpoint6 {
@@ -132,7 +132,7 @@ fn ndp_two_stacks_udp_roundtrip_and_loopback() {
 #[test]
 fn multicast_requires_join_and_returns_local_copy() {
     let mut a = stack();
-    let mut b = Stack::new(cfg_b(1 << 20), 2).unwrap();
+    let mut b = Stack::new(cfg_b(1 << 20), secret(2)).unwrap();
     let ah = a.udp6_bind(5353, NOW).unwrap();
     let bh = b.udp6_bind(5353, NOW).unwrap();
     a.join_group6(GROUP, NOW).unwrap();

@@ -24,7 +24,7 @@
 //!     budget: 1 << 20,
 //!     ..Config::default()
 //! };
-//! let mut stack = Stack::new(cfg, 0x1234_5678)?;
+//! let mut stack = Stack::new(cfg, [7; 16])?;
 //! let mut frame = vec![0u8; stack.frame_len()];
 //! let now = 1_000_000_000; // Monotone nanoseconden van de aanroeper.
 //!
@@ -63,7 +63,7 @@
 //!
 //! ```
 //! # use leannet::{Config, Stack, Error};
-//! # let mut stack = Stack::new(Config { ip: [10,0,0,1], prefix: 24, budget: 1 << 20, ..Config::default() }, 1)?;
+//! # let mut stack = Stack::new(Config { ip: [10,0,0,1], prefix: 24, budget: 1 << 20, ..Config::default() }, [1; 16])?;
 //! # let now = 0;
 //! let l = stack.tcp_listen(80)?;
 //! match stack.tcp_accept(l, now) {

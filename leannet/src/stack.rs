@@ -34,7 +34,8 @@ pub const ETHERNET_HEADER_SIZE: usize = SIZE_ETH;
 /// Header plus FCS-marge: een frame is hoogstens `mtu + ETHERNET_MAXIMUM_SIZE`.
 pub const ETHERNET_MAXIMUM_SIZE: usize = 18;
 
-/// Eerste efemere poort (RFC 6335). Dit bereik blijft los van `hopswitch.MasqEnd`.
+/// Eerste efemere poort (RFC 6335). Dit bereik blijft los van de
+/// NAT-poorten van hop-os (`net/src/nat.rs`).
 pub(crate) const EPHEMERAL_BASE: u16 = 49152;
 /// Laatste efemere poort.
 pub(crate) const EPHEMERAL_END: u16 = 65535;
@@ -281,8 +282,11 @@ pub struct Stack {
     /// Een statisch geplande gateway.
     pub(crate) gw_mac: Option<[u8; 6]>,
     pub(crate) closed: bool,
-    pub(crate) next_eph: u16,
-    pub(crate) iss_seed: u32,
+    /// Het geheim van de ISS en de efemere poorten (RFC 6528, RFC 6056):
+    /// de SipHash-sleutel.
+    secret: [u64; 2],
+    /// Hoeveel efemere poorten er gekozen zijn; de invoer van de PRF.
+    eph_count: u64,
     next_generation: u32,
     /// Een frame-grote kladbuffer voor loopback-ingress en UDP-bouw.
     pub(crate) scratch: Vec<u8>,
@@ -320,10 +324,51 @@ pub(crate) fn is_broadcast_ip(dst: [u8; 4], ip: [u8; 4], prefix: u8) -> bool {
     d & mask == u32::from_be_bytes(ip) & mask && d & !mask == !mask
 }
 
+/// SipHash-2-4 (Aumasson en Bernstein, 2012) met sleutel `key` over
+/// `words`, elk een blok van acht bytes little-endian: de PRF die Linux voor
+/// de ISS en de efemere poort gebruikt (`net/core/secure_seq.c`). Een paar
+/// regels hier in plaats van een afhankelijkheid van leancrypto, dat geen
+/// SipHash heeft.
+pub(crate) fn siphash(key: [u64; 2], words: &[u64]) -> u64 {
+    fn round(v: &mut [u64; 4]) {
+        v[0] = v[0].wrapping_add(v[1]);
+        v[1] = v[1].rotate_left(13) ^ v[0];
+        v[0] = v[0].rotate_left(32);
+        v[2] = v[2].wrapping_add(v[3]);
+        v[3] = v[3].rotate_left(16) ^ v[2];
+        v[0] = v[0].wrapping_add(v[3]);
+        v[3] = v[3].rotate_left(21) ^ v[0];
+        v[2] = v[2].wrapping_add(v[1]);
+        v[1] = v[1].rotate_left(17) ^ v[2];
+        v[2] = v[2].rotate_left(32);
+    }
+    let mut v = [
+        key[0] ^ 0x736f_6d65_7073_6575,
+        key[1] ^ 0x646f_7261_6e64_6f6d,
+        key[0] ^ 0x6c79_6765_6e65_7261,
+        key[1] ^ 0x7465_6462_7974_6573,
+    ];
+    // Het laatste blok draagt de lengte in bytes (modulo 256) bovenin.
+    let last = (words.len() as u64).wrapping_mul(8) << 56;
+    for &m in words.iter().chain([&last]) {
+        v[3] ^= m;
+        round(&mut v);
+        round(&mut v);
+        v[0] ^= m;
+    }
+    v[2] ^= 0xff;
+    for _ in 0..4 {
+        round(&mut v);
+    }
+    v[0] ^ v[1] ^ v[2] ^ v[3]
+}
+
 impl Stack {
-    /// Maakt een stack. `iss_seed` hoort uit een echte entropiebron van de
-    /// aanroeper te komen.
-    pub fn new(mut cfg: Config, iss_seed: u32) -> Result<Stack> {
+    /// Maakt een stack. `secret` (128 bits) hoort uit een echte
+    /// entropiebron van de aanroeper te komen: het is de sleutel van de ISS
+    /// (RFC 6528) en van de efemere poorten (RFC 6056). Wie hem kent, kan
+    /// beide voorspellen.
+    pub fn new(mut cfg: Config, secret: [u8; 16]) -> Result<Stack> {
         if cfg.prefix > 32 {
             return Err(Error::InvalidPrefix { prefix: cfg.prefix });
         }
@@ -344,10 +389,11 @@ impl Stack {
             cfg.mtu.min(usize::from(u16::MAX))
         };
         let frame = mtu + ETHERNET_MAXIMUM_SIZE;
-        let span = u32::from(EPHEMERAL_END - EPHEMERAL_BASE) + 1;
-        // Een vervangende stack mag niet altijd het eerste tupel hergebruiken:
-        // peers houden TIME_WAIT vast over een kernel-FLIP van de node.
-        let eph = u16::try_from(iss_seed % span).unwrap_or(0);
+        let [a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p] = secret;
+        let secret = [
+            u64::from_le_bytes([a, b, c, d, e, f, g, h]),
+            u64::from_le_bytes([i, j, k, l, m, n, o, p]),
+        ];
         Ok(Stack {
             cfg,
             mtu,
@@ -369,8 +415,8 @@ impl Stack {
             groups: Vec::new(),
             gw_mac: None,
             closed: false,
-            next_eph: EPHEMERAL_BASE + eph,
-            iss_seed,
+            secret,
+            eph_count: 0,
             next_generation: 1,
             scratch: alloc_zeroed(frame)?,
             udp_out_waiters: false,
@@ -857,7 +903,7 @@ impl Stack {
                 return;
             }
         };
-        let iss = self.next_iss();
+        let iss = self.iss(key, now);
         let adv_mss = self.adv_mss(src);
         let adv_ws = self.cfg.adv_ws;
         if let Some(c) = self.conns.get_mut(i).and_then(Option::as_mut) {
@@ -1066,23 +1112,35 @@ impl Stack {
         Ok(self.conns.len() - 1)
     }
 
-    /// Schuift per verbinding op, zodat snel poorthergebruik niet op oude
-    /// segmenten past. De priemstap loopt de hele ruimte door.
-    pub(crate) fn next_iss(&mut self) -> u32 {
-        self.iss_seed = self.iss_seed.wrapping_add(64007);
-        self.iss_seed
+    /// De ISS van een verbinding: M + F(4-tupel, geheim) (RFC 6528 §3),
+    /// zoals Linux `secure_tcp_seq`. F is SipHash-2-4 over de adressen en
+    /// poorten; M is de monotone klok in stappen van 64 ns (Linux
+    /// `seq_scale`: rond in 274 s, sneller dan 2MSL). Wie één verbinding
+    /// opent, leert niets over de ISS van een ander tupel (RFC 9293 §3.4.1,
+    /// blinde spoofing); voor hetzelfde tupel loopt hij met de klok op, zodat
+    /// een nieuwe SYN boven de oude volgnummers van de peer ligt.
+    pub(crate) fn iss(&self, key: ConnKey, now: u64) -> u32 {
+        let ips = u64::from(u32::from_be_bytes(self.cfg.ip)) << 32
+            | u64::from(u32::from_be_bytes(key.rip));
+        let ports = u64::from(key.lport) << 16 | u64::from(key.rport);
+        // De lage 32 bits van beide: volgnummers rekenen modulo 2^32.
+        (siphash(self.secret, &[ips, ports]) as u32).wrapping_add((now >> 6) as u32)
     }
 
-    /// Kiest de volgende vrije dynamische poort. `in_use` levert de
-    /// naamruimte, want TCP- en UDP-poorten zijn onafhankelijk.
+    /// Kiest een vrije dynamische poort volgens RFC 6056 §3.3.1 (algoritme
+    /// 1, zoals Linux voor UDP): een begin uit de PRF over een teller, dan
+    /// de eerste vrije vanaf daar. Zo is de volgende poort niet uit de
+    /// vorige te raden. Dat een peer een tupel nog in TIME-WAIT heeft, vangt
+    /// de ISS op: die loopt met de klok op. `in_use` levert de naamruimte,
+    /// want TCP- en UDP-poorten zijn onafhankelijk.
     pub(crate) fn ephemeral_port(&mut self, in_use: impl Fn(&Stack, u16) -> bool) -> Result<u16> {
-        for _ in 0..=u32::from(EPHEMERAL_END - EPHEMERAL_BASE) {
-            let p = self.next_eph;
-            self.next_eph = if p == EPHEMERAL_END {
-                EPHEMERAL_BASE
-            } else {
-                p + 1
-            };
+        let span = u64::from(EPHEMERAL_END - EPHEMERAL_BASE) + 1;
+        self.eph_count = self.eph_count.wrapping_add(1);
+        // Eén woord invoer, de ISS twee: zo valt de ene PRF nooit samen met
+        // de andere.
+        let start = siphash(self.secret, &[self.eph_count]) % span;
+        for i in 0..span {
+            let p = EPHEMERAL_BASE + u16::try_from((start + i) % span).unwrap_or(0);
             if !in_use(self, p) {
                 return Ok(p);
             }
