@@ -766,6 +766,23 @@ fn tcp_tx_grows_when_peer_offers_window() {
     );
 }
 
+/// Een dial heeft één grens, de deadline van de aanroeper: de SYN gaat
+/// met de RTO-backoff opnieuw, ook na de ladder van het passieve embryo.
+#[test]
+fn tcp_dial_keeps_trying_until_the_callers_deadline() {
+    let mut w = new_pair(1024, 1024);
+    let mut syns = 0;
+    for _ in 0..100 {
+        syns += w.drain_a().iter().filter(|p| has(p, SYN)).count();
+        w.advance(2 * SEC);
+    }
+    assert_eq!(w.a.state, TcpState::SynSent, "de dial gaf zelf op");
+    assert!(
+        syns > 1 + usize::from(TCP_MAX_RETRIES_HANDSHAKE),
+        "{syns} SYN's in 200 s"
+    );
+}
+
 #[test]
 fn tcp_half_open_gives_up() {
     let mut w = new_pair(1024, 1024);

@@ -78,7 +78,7 @@ fn multicast_refusals() {
     let now = net.now;
     let a = &mut net.a;
     assert!(
-        a.tcp_connect(MDNS, 80, Some(now + SEC), now).is_err(),
+        a.tcp_connect(MDNS, 80, now + SEC, now).is_err(),
         "tcp_connect accepted multicast"
     );
     let u = a.udp_bind(5000).unwrap();

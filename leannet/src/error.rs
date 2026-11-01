@@ -69,13 +69,6 @@ pub enum Error {
         /// Poort van de peer.
         port: u16,
     },
-    /// De handshake kreeg na alle pogingen geen antwoord.
-    ConnectTimeout {
-        /// Adres van de peer.
-        ip: [u8; 4],
-        /// Poort van de peer.
-        port: u16,
-    },
     /// ARP gaf op voor de next hop.
     Unreachable {
         /// De next hop waarvoor ARP opgaf.
@@ -206,11 +199,6 @@ impl fmt::Display for Error {
             Error::Refused { ip, port } => {
                 write!(f, "leannet: connection refused ({}:{port})", Ip(ip))
             }
-            Error::ConnectTimeout { ip, port } => write!(
-                f,
-                "leannet: connect timed out, no response ({}:{port})",
-                Ip(ip)
-            ),
             Error::Unreachable { hop } => {
                 write!(f, "leannet: no route to host (arp gave up for {})", Ip(hop))
             }

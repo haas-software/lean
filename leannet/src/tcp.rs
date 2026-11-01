@@ -103,24 +103,35 @@ impl fmt::Display for TcpState {
 }
 
 // ---- RTO-parameters (RFC 6298) en levensloopgrenzen ----
+//
+// Waar een waarde van de RFC afwijkt, staat de reden erbij en in KAM.md
+// (leannet, "Afwijkingen van de RFC"); anders is hij de RFC.
 
 /// Begin-RTO.
 pub(crate) const TCP_RTO_INITIAL: u64 = SEC;
-/// RFC 6298 §2.4 raadt 1 s aan; ingebedde LANs gebruiken een lagere vloer.
+/// De vloer van de RTO. RFC 6298 §2.4 zegt 1 s (een SHOULD); hier 200 ms,
+/// zoals Linux (`TCP_RTO_MIN`, HZ/5). De reden: deze nodes praten over een
+/// LAN met een RTT onder de milliseconde, en een vloer van 1 s laat elk
+/// verloren segment een seconde stilstaan.
 pub(crate) const TCP_RTO_MIN: u64 = 200 * MS;
 /// Plafond van de RTO.
 pub(crate) const TCP_RTO_MAX: u64 = 60 * SEC;
 /// Plafond op het verdubbelen; een vastgelopen peer blijft op `TCP_RTO_MAX` peilen.
 const TCP_BACKOFF_MAX: u8 = 12;
-/// TIME-WAIT: ingebedde doelen kunnen geen vier minuten 2MSL betalen.
+/// TIME-WAIT. RFC 9293 §3.6.1 zegt 2MSL (vier minuten); hier 1 s. De
+/// redenen: geheugen (een verbinding in TIME-WAIT houdt haar plek, haar
+/// vloerbuffers en haar tupel) en de warme flip, die geen minuten wacht. Een
+/// nieuw tupel tegen oude segmenten beschermen doet de ISS (RFC 6528: hij
+/// loopt met de klok op, zie `Stack::iss`).
 pub(crate) const TCP_TIME_WAIT_DUR: u64 = SEC;
 /// Een volledige socket-close krijgt één absolute termijn voor wachtende data,
 /// FIN en TIME-WAIT samen. ACKs en vensterupdates kunnen hem bewust niet
 /// verlengen: nadat de eigenaar de socket losliet is een coöperatieve close
 /// nuttig, maar het tupel en de buffers eeuwig vasthouden niet.
 pub(crate) const TCP_FULL_CLOSE_DUR: u64 = 20 * SEC;
-/// FIN-WAIT-2 krijgt dezelfde grens voor gebruikers die alleen half sluiten.
-pub(crate) const TCP_FIN_WAIT2_DUR: u64 = 20 * SEC;
+/// FIN-WAIT-2 na een halve close: de RFC kent geen grens, Linux breekt na
+/// `tcp_fin_timeout` (60 s) af. Dat doen wij ook.
+pub(crate) const TCP_FIN_WAIT2_DUR: u64 = 60 * SEC;
 /// CLOSE-WAIT: de peer is klaar. Staartlezen en antwoorden blijven mogelijk,
 /// maar een vergeten verbinding wordt na twee minuten zonder echte
 /// applicatie-I/O of ACK-voortgang opgeruimd.
@@ -129,7 +140,13 @@ pub(crate) const TCP_CLOSE_WAIT_DUR: u64 = 120 * SEC;
 pub(crate) const TCP_DEFAULT_MSS: usize = 536;
 /// De MSS-klem zonder geadverteerde MSS: MTU 1500 min IP- en TCP-header.
 const TCP_CLASSIC_MSS: usize = crate::MTU - 40;
-/// RTOs zonder geldige ACK tijdens de handshake: ongeveer zes seconden.
+/// RTO's zonder geldige ACK voor het passieve embryo (SYN-RECEIVED): de
+/// SYN|ACK gaat er zes keer uit, na 0, 1, 3, 7, 15 en 31 s, en na 63 s geeft
+/// het op. RFC 9293 §3.8.3 vraagt minstens drie minuten (een SHOULD); dit is
+/// Linux `tcp_synack_retries` (5). De reden: een embryo houdt een plek en
+/// vloerbuffers vast voor een peer die nog niets bewees. Een dial
+/// (SYN-SENT) heeft geen eigen ladder: zijn ene grens is de deadline van de
+/// aanroeper.
 pub(crate) const TCP_MAX_RETRIES_HANDSHAKE: u8 = 5;
 /// RTOs zonder geldige ACK met data: minuten voor een verdwenen peer. Elke
 /// geldige ACK zet de teller terug, dus een levende zero-window-peer blijft.
@@ -1130,10 +1147,12 @@ impl TcpConn {
     /// De RTO of persist-timer liep af. Geeft een reset als de pogingen op zijn.
     fn on_timer(&mut self, now: u64) -> Option<Seg> {
         self.retries = self.retries.saturating_add(1);
-        let limit = if matches!(self.state, TcpState::SynSent | TcpState::SynRcvd) {
-            TCP_MAX_RETRIES_HANDSHAKE
-        } else {
-            TCP_MAX_RETRIES_DATA
+        let limit = match self.state {
+            TcpState::SynRcvd => TCP_MAX_RETRIES_HANDSHAKE,
+            // Een dial geeft niet zelf op: de deadline van de aanroeper is zijn
+            // ene grens (`tcp_poll_connect`).
+            TcpState::SynSent => u8::MAX,
+            _ => TCP_MAX_RETRIES_DATA,
         };
         if self.retries > limit {
             // De peer bleef stil over de hele backoff-ladder.

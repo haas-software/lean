@@ -20,8 +20,8 @@ use core::task::Waker;
 
 use crate::multicast::{is_link_local_multicast, is_multicast_ip};
 use crate::stack::{
-    ConnKey, DIAL_TIMEOUT_DEFAULT, Dial, ListenHandle, Listener, MTU, TCP_BACKLOG, TCP_FLOOR_RX,
-    TCP_FLOOR_TX, TcpHandle, UdpHandle,
+    ConnKey, Dial, ListenHandle, Listener, MTU, TCP_BACKLOG, TCP_FLOOR_RX, TCP_FLOOR_TX, TcpHandle,
+    UdpHandle,
 };
 use crate::tcp::TcpState;
 use crate::wire::{SIZE_IPV4, SIZE_UDP};
@@ -179,13 +179,15 @@ impl Stack {
 
     /// Opent actief een verbinding en geeft meteen een handvat; de SYN gaat
     /// bij de volgende pomp. Vraag [`Stack::tcp_poll_connect`] tot hij `Ok`
-    /// of een fout geeft. `deadline` (monotone nanoseconden) begrenst de
-    /// dial; zonder is dat 30 seconden, tegen stille hosts.
+    /// of een fout geeft. `deadline` (monotone nanoseconden) is de ene grens
+    /// van de dial: tot dan gaat de SYN opnieuw met de RTO-backoff, daarna
+    /// is het [`Error::DeadlineExceeded`]. Er is geen standaard en geen
+    /// tweede ladder ernaast.
     pub fn tcp_connect(
         &mut self,
         ip: [u8; 4],
         port: u16,
-        deadline: Option<u64>,
+        deadline: u64,
         now: u64,
     ) -> Result<TcpHandle> {
         // TCP naar multicast is betekenisloos: ingress laat multicast-TCP per
@@ -220,7 +222,7 @@ impl Stack {
         c.tcp.open_active(iss, adv_mss, adv_ws);
         c.app_owned = true;
         c.dial = Some(Dial {
-            deadline: deadline.unwrap_or(now + DIAL_TIMEOUT_DEFAULT),
+            deadline,
             hop,
             via_arp,
         });
@@ -273,11 +275,8 @@ impl Stack {
                     port: key.rport,
                 })
             } else {
-                // Geen RST en geen antwoord: de handshakepogingen zijn op.
-                Err(Error::ConnectTimeout {
-                    ip: key.rip,
-                    port: key.rport,
-                })
+                // Lokaal afgebroken (`abort_peer`): er gaf niemand op.
+                Err(Error::Closed)
             }
         } else {
             return Err(Error::WouldBlock);

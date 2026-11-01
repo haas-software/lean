@@ -64,8 +64,6 @@ pub(crate) const TCP_BACKLOG: usize = 8;
 /// teruggeeft. Die overdracht is begrensd los van peerverkeer, zodat een
 /// vergeten listener de tupels en vloerbuffers niet eeuwig vasthoudt.
 pub(crate) const TCP_BACKLOG_WAIT_DUR: u64 = 30 * SEC;
-/// Begrenst dials zonder eigen deadline tegen stille hosts.
-pub(crate) const DIAL_TIMEOUT_DEFAULT: u64 = 30 * SEC;
 
 /// Stackidentiteit en het totale verbindingsbufferbudget.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

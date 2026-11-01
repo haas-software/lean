@@ -30,7 +30,7 @@ fn sb(n: &mut Net) -> &mut Stack {
 /// Dialt vanaf a en wacht op de uitkomst, zoals `DialTCP` met een deadline.
 fn dial(net: &mut Net, ip: [u8; 4], port: u16, within: u64) -> Result<TcpHandle> {
     let now = net.now;
-    let h = net.a.tcp_connect(ip, port, Some(now + within), now)?;
+    let h = net.a.tcp_connect(ip, port, now + within, now)?;
     let mut out = Err(Error::WouldBlock);
     net.run_until(within + SEC, |n| {
         out = n.a.tcp_poll_connect(h, n.now);
@@ -561,7 +561,7 @@ fn stack_budget_recovery() {
     let mut recovered = false;
     net.run_until(5 * SEC, |n| {
         let now = n.now;
-        if let Ok(c3) = n.a.tcp_connect(IP_B, 89, Some(now + 2 * SEC), now) {
+        if let Ok(c3) = n.a.tcp_connect(IP_B, 89, now + 2 * SEC, now) {
             n.settle();
             if n.a.tcp_poll_connect(c3, n.now).is_ok() {
                 recovered = true;
@@ -588,7 +588,7 @@ fn stack_routes_off_subnet_via_gateway() {
     let now = net.now;
     let c = net
         .a
-        .tcp_connect([8, 8, 8, 8], 443, Some(now + 3 * SEC), now)
+        .tcp_connect([8, 8, 8, 8], 443, now + 3 * SEC, now)
         .unwrap();
     net.settle();
     let targets: Vec<_> = net
@@ -651,9 +651,7 @@ fn stack_static_gateway_mac_skips_arp() {
     );
     let now = net.now;
     net.a.seed_neighbor([10, 100, 0, 1], gw_mac, now).unwrap();
-    net.a
-        .tcp_connect([1, 1, 1, 1], 80, Some(now + SEC), now)
-        .unwrap();
+    net.a.tcp_connect([1, 1, 1, 1], 80, now + SEC, now).unwrap();
     net.settle();
     assert_eq!(
         net.arp_frames_a, 0,
@@ -1030,7 +1028,7 @@ fn stack_zonder_gateway_faalt_meteen() {
     let now = net.now;
     let err = net
         .a
-        .tcp_connect([192, 168, 1, 1], 80, Some(now + 10 * SEC), now)
+        .tcp_connect([192, 168, 1, 1], 80, now + 10 * SEC, now)
         .unwrap_err();
     assert!(
         alloc::format!("{err}").contains("no gateway"),
@@ -1235,7 +1233,7 @@ fn stack_dial_annuleerbaar() {
     let now = net.now;
     let h = net
         .a
-        .tcp_connect([10, 0, 0, 99], 80, Some(now + 10 * SEC), now)
+        .tcp_connect([10, 0, 0, 99], 80, now + 10 * SEC, now)
         .unwrap();
     net.run_for(50 * MS);
     // Annuleren is sluiten: één opruimpad.
@@ -1577,7 +1575,7 @@ fn socket_weigert_onzinnige_poort() {
     let mut net = Net::single(cfg_a(1 << 20), 7);
     let now = net.now;
     assert_eq!(
-        net.a.tcp_connect(IP_B, 0, None, now),
+        net.a.tcp_connect(IP_B, 0, now + SEC, now),
         Err(Error::InvalidPort)
     );
     assert_eq!(slots(&net.a), 0);
