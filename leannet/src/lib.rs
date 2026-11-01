@@ -66,12 +66,12 @@
 //! # let mut stack = Stack::new(Config { ip: [10,0,0,1], prefix: 24, budget: 1 << 20, ..Config::default() }, [1; 16])?;
 //! # let now = 0;
 //! let l = stack.tcp_listen(80)?;
-//! match stack.tcp_accept(l, now) {
+//! match stack.tcp_accept(l) {
 //!     Ok(conn) => {
 //!         let mut buf = [0u8; 512];
-//!         match stack.tcp_read(conn, &mut buf, now) {
+//!         match stack.tcp_read(conn, &mut buf) {
 //!             Ok(0) => { /* EOF */ }
-//!             Ok(n) => { stack.tcp_write(conn, &buf[..n], now)?; }
+//!             Ok(n) => { stack.tcp_write(conn, &buf[..n])?; }
 //!             Err(Error::WouldBlock) => { /* registreer een waker */ }
 //!             Err(e) => return Err(e),
 //!         }

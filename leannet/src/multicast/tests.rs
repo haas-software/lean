@@ -120,7 +120,7 @@ fn multicast_source_dropped() {
     );
     b.receive(&frame, now).unwrap();
     assert_eq!(
-        b.udp_recv_from(ub, &mut [0; 64], now),
+        b.udp_recv_from(ub, &mut [0; 64]),
         Err(Error::WouldBlock),
         "delivered from a multicast source"
     );
@@ -152,7 +152,7 @@ fn multicast_end_to_end() {
         ("loopback", &mut net.a, ua),
     ] {
         let (n, from) = s
-            .udp_recv_from(u, &mut buf, now)
+            .udp_recv_from(u, &mut buf)
             .unwrap_or_else(|e| panic!("{tag}: {e}"));
         assert_eq!(&buf[..n], b"who has _matterc", "{tag}");
         assert_eq!(from.ip, IP_A, "{tag}: src");
@@ -165,7 +165,7 @@ fn multicast_end_to_end() {
     net.a.udp_send_to(ua, other, b"anyone?", now).unwrap();
     net.settle();
     assert_eq!(
-        net.b().udp_recv_from(ub, &mut buf, now),
+        net.b().udp_recv_from(ub, &mut buf),
         Err(Error::WouldBlock),
         "received for a group nobody joined"
     );

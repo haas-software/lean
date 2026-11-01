@@ -42,16 +42,13 @@ fn dial(net: &mut Net, ip: [u8; 4], port: u16, within: u64) -> Result<TcpHandle>
 /// Neemt een verbinding aan op `side`.
 fn accept(net: &mut Net, side: Side, l: ListenHandle) -> TcpHandle {
     let mut got = None;
-    net.run_until(5 * SEC, |n| {
-        let now = n.now;
-        match side(n).tcp_accept(l, now) {
-            Ok(h) => {
-                got = Some(h);
-                true
-            }
-            Err(Error::WouldBlock) => false,
-            Err(e) => panic!("accept: {e}"),
+    net.run_until(5 * SEC, |n| match side(n).tcp_accept(l) {
+        Ok(h) => {
+            got = Some(h);
+            true
         }
+        Err(Error::WouldBlock) => false,
+        Err(e) => panic!("accept: {e}"),
     });
     got.expect("server never accepted")
 }
@@ -68,8 +65,7 @@ fn connected(net: &mut Net, port: u16) -> (TcpHandle, TcpHandle, ListenHandle) {
 fn write_all(net: &mut Net, side: Side, h: TcpHandle, data: &[u8], within: u64) {
     let mut off = 0;
     let ok = net.run_until(within, |n| {
-        let now = n.now;
-        match side(n).tcp_write(h, &data[off..], now) {
+        match side(n).tcp_write(h, &data[off..]) {
             Ok(k) => off += k,
             Err(Error::WouldBlock) => {}
             Err(e) => panic!("write after {off} bytes: {e}"),
@@ -84,9 +80,8 @@ fn read_exact(net: &mut Net, side: Side, h: TcpHandle, want: usize, within: u64)
     let mut got = Vec::new();
     let mut buf = vec![0u8; 32 << 10];
     let ok = net.run_until(within, |n| {
-        let now = n.now;
         loop {
-            match side(n).tcp_read(h, &mut buf, now) {
+            match side(n).tcp_read(h, &mut buf) {
                 Ok(0) => panic!("EOF after {} of {want} bytes", got.len()),
                 Ok(k) => got.extend_from_slice(&buf[..k]),
                 Err(Error::WouldBlock) => break,
@@ -133,28 +128,27 @@ fn stack_tcp_echo_end_to_end() {
     let mut got = Vec::new();
     let mut buf = vec![0u8; 4096];
     let ok = net.run_until(5 * SEC, |n| {
-        let now = n.now;
         if server.is_none() {
-            server = n.b().tcp_accept(l, now).ok();
+            server = n.b().tcp_accept(l).ok();
         }
         if let Some(s) = server {
             // De echoserver: lezen en terugschrijven, met een eigen restbuffer.
-            while let Ok(k) = n.b().tcp_read(s, &mut buf, now) {
+            while let Ok(k) = n.b().tcp_read(s, &mut buf) {
                 if k == 0 {
                     break;
                 }
                 pending.extend_from_slice(&buf[..k]);
             }
-            if let Ok(k) = n.b().tcp_write(s, &pending, now) {
+            if let Ok(k) = n.b().tcp_write(s, &pending) {
                 pending.drain(..k);
             }
         }
         if sent < msg.len()
-            && let Ok(k) = n.a.tcp_write(c, &msg[sent..], now)
+            && let Ok(k) = n.a.tcp_write(c, &msg[sent..])
         {
             sent += k;
         }
-        while let Ok(k) = n.a.tcp_read(c, &mut buf, now) {
+        while let Ok(k) = n.a.tcp_read(c, &mut buf) {
             if k == 0 {
                 break;
             }
@@ -193,7 +187,6 @@ fn stack_udp_roundtrip() {
     let srv = net.b().udp_bind(53).unwrap();
     let cl = net.a.udp_bind(0).unwrap();
     let to = Endpoint { ip: IP_B, port: 53 };
-    let now = net.now;
     // De eerste zending wacht op ARP.
     let mut sent = false;
     net.run_until(3 * SEC, |n| {
@@ -204,7 +197,7 @@ fn stack_udp_roundtrip() {
     let mut buf = [0u8; 512];
     let ok = net.run_until(3 * SEC, |n| {
         let now = n.now;
-        if let Ok((k, from)) = n.b().udp_recv_from(srv, &mut buf, now) {
+        if let Ok((k, from)) = n.b().udp_recv_from(srv, &mut buf) {
             let mut reply = b"re:".to_vec();
             reply.extend_from_slice(&buf[..k]);
             n.b().udp_send_to(srv, from, &reply, now).unwrap();
@@ -212,7 +205,7 @@ fn stack_udp_roundtrip() {
         n.a.udp_readable(cl).unwrap()
     });
     assert!(ok, "no reply");
-    let (k, from) = net.a.udp_recv_from(cl, &mut buf, now).unwrap();
+    let (k, from) = net.a.udp_recv_from(cl, &mut buf).unwrap();
     assert_eq!((&buf[..k], from), (&b"re:query"[..], to));
     assert!(
         net.a.udp_local(cl).unwrap().port >= EPHEMERAL_BASE,
@@ -238,7 +231,7 @@ fn tcp_readable_meldt_data_en_fin_zonder_te_lezen() {
     net.b().tcp_close(s, now).unwrap();
     let ok = net.run_until(SEC, |n| n.a.tcp_readable(c) == Ok(true));
     assert!(ok, "readable werd nooit waar na de FIN van de peer");
-    assert_eq!(net.a.tcp_read(c, &mut [0; 16], net.now), Ok(0));
+    assert_eq!(net.a.tcp_read(c, &mut [0; 16]), Ok(0));
     // Een vreemd handvat is een fout, geen `false`.
     net.a.tcp_close(c, net.now).unwrap();
     assert_eq!(net.a.tcp_readable(c), Err(Error::Closed));
@@ -525,8 +518,7 @@ fn stack_listener_backlog_overflow() {
         "b holds more or fewer than the backlog"
     );
     for c in conns {
-        let now = net.now;
-        match net.a.tcp_read(c, &mut [0; 1], now) {
+        match net.a.tcp_read(c, &mut [0; 1]) {
             Err(Error::WouldBlock) => {}
             _ => reset += 1,
         }
@@ -537,9 +529,8 @@ fn stack_listener_backlog_overflow() {
         "overflow clients that saw the RST"
     );
     for i in 0..TCP_BACKLOG {
-        let now = net.now;
         net.b()
-            .tcp_accept(l, now)
+            .tcp_accept(l)
             .unwrap_or_else(|e| panic!("accept {i}: {e}"));
     }
     net.b().tcp_listen_close(l);
@@ -671,7 +662,7 @@ fn stack_udp_accessors() {
     let a = &mut net.a;
     let u = a.udp_bind(5555).unwrap();
     assert_eq!(a.udp_local(u).unwrap().port, 5555);
-    assert_eq!(a.udp_recv_from(u, &mut [0; 8], now), Err(Error::WouldBlock));
+    assert_eq!(a.udp_recv_from(u, &mut [0; 8]), Err(Error::WouldBlock));
     let port0 = Endpoint { ip: IP_B, port: 0 };
     assert_eq!(
         a.udp_send_to(u, port0, b"x", now),
@@ -680,7 +671,7 @@ fn stack_udp_accessors() {
     );
     a.udp_close(u);
     a.udp_close(u);
-    assert_eq!(a.udp_recv_from(u, &mut [0; 8], now), Err(Error::Closed));
+    assert_eq!(a.udp_recv_from(u, &mut [0; 8]), Err(Error::Closed));
     let u2 = a.udp_bind(5555).expect("rebind after close");
     a.udp_close(u2);
 }
@@ -688,19 +679,18 @@ fn stack_udp_accessors() {
 #[test]
 fn stack_listener_rejects_busy_port_and_reports_addr() {
     let mut net = Net::pair(1 << 20, 1 << 20);
-    let now = net.now;
     let a = &mut net.a;
     let l = a.tcp_listen(1234).unwrap();
     assert_eq!(a.listen_port(l), Ok(1234));
     assert_eq!(a.tcp_listen(1234), Err(Error::TcpPortInUse { port: 1234 }));
     a.tcp_listen_close(l);
     let l2 = a.tcp_listen(1234).expect("relisten after close");
-    assert_eq!(a.tcp_accept(l2, now), Err(Error::WouldBlock));
+    assert_eq!(a.tcp_accept(l2), Err(Error::WouldBlock));
     let (w, woke) = counting_waker();
     a.listen_register_waker(l2, &w).unwrap();
     a.tcp_listen_close(l2);
     assert!(woke.count() > 0, "close did not release a blocked accept");
-    assert_eq!(a.tcp_accept(l2, now), Err(Error::Closed));
+    assert_eq!(a.tcp_accept(l2), Err(Error::Closed));
 }
 
 #[test]
@@ -712,11 +702,10 @@ fn stack_fast_reader_keeps_full_window() {
     let mut got = 0;
     let mut buf = vec![0u8; 32 << 10];
     let ok = net.run_until(5 * SEC, |n| {
-        let now = n.now;
-        if let Ok(k) = n.a.tcp_write(c, &payload[off..], now) {
+        if let Ok(k) = n.a.tcp_write(c, &payload[off..]) {
             off += k;
         }
-        while let Ok(k) = n.b().tcp_read(s, &mut buf, now) {
+        while let Ok(k) = n.b().tcp_read(s, &mut buf) {
             if k == 0 {
                 break;
             }
@@ -792,12 +781,12 @@ fn stack_self_dial_udp() {
     net.a.udp_send_to(cl, to, b"ping", now).unwrap();
     net.settle();
     let mut buf = [0u8; 256];
-    let (k, from) = net.a.udp_recv_from(srv, &mut buf, now).unwrap();
+    let (k, from) = net.a.udp_recv_from(srv, &mut buf).unwrap();
     let mut reply = b"echo:".to_vec();
     reply.extend_from_slice(&buf[..k]);
     net.a.udp_send_to(srv, from, &reply, now).unwrap();
     net.settle();
-    let (k, _) = net.a.udp_recv_from(cl, &mut buf, now).unwrap();
+    let (k, _) = net.a.udp_recv_from(cl, &mut buf).unwrap();
     assert_eq!(&buf[..k], b"echo:ping", "udp loopback");
 }
 
@@ -936,13 +925,12 @@ fn abort_peer_breekt_alles_van_een_adres_af() {
     assert_eq!(net.a.abort_peer(IP_B), 2);
     assert!(woke.count() > 0, "de lezer werd niet gewekt");
     assert_eq!(net.a.pot.used, 0, "het budget kwam niet terug");
-    let now = net.now;
-    assert_eq!(net.a.tcp_read(c1, &mut [0; 8], now), Err(Error::Reset));
-    assert_eq!(net.a.tcp_write(c2, b"x", now), Err(Error::Reset));
+    assert_eq!(net.a.tcp_read(c1, &mut [0; 8]), Err(Error::Reset));
+    assert_eq!(net.a.tcp_write(c2, b"x"), Err(Error::Reset));
     // De peer krijgt de RST's: beide kanten zijn weg.
     net.run_for(50 * MS);
     for s in [s1, s2] {
-        assert_eq!(net.b().tcp_read(s, &mut [0; 8], now), Err(Error::Reset));
+        assert_eq!(net.b().tcp_read(s, &mut [0; 8]), Err(Error::Reset));
     }
     // Daarna is het adres gewoon weer bereikbaar.
     assert!(dial(&mut net, IP_B, 90, 5 * SEC).is_ok());
@@ -983,11 +971,10 @@ fn stack_idle_verbinding_geeft_buffers_terug() {
     let mut got = Vec::new();
     let mut buf = vec![0u8; 32 << 10];
     let ok = net.run_until(15 * SEC, |n| {
-        let now = n.now;
-        if let Ok(k) = n.a.tcp_write(c, &payload[off..], now) {
+        if let Ok(k) = n.a.tcp_write(c, &payload[off..]) {
             off += k;
         }
-        while let Ok(k) = n.b().tcp_read(s, &mut buf, now) {
+        while let Ok(k) = n.b().tcp_read(s, &mut buf) {
             if k == 0 {
                 break;
             }
@@ -1077,8 +1064,7 @@ fn stack_zonder_gateway_faalt_meteen() {
 fn sock_close_deblokkeer_read() {
     let mut net = Net::pair(1 << 20, 1 << 20);
     let (c, _, _) = connected(&mut net, 90);
-    let now = net.now;
-    assert_eq!(net.a.tcp_read(c, &mut [0; 16], now), Err(Error::WouldBlock));
+    assert_eq!(net.a.tcp_read(c, &mut [0; 16]), Err(Error::WouldBlock));
     let (w, woke) = counting_waker();
     net.a.tcp_register_read_waker(c, &w).unwrap();
     net.run_for(50 * MS);
@@ -1087,7 +1073,7 @@ fn sock_close_deblokkeer_read() {
         woke.count() > 0,
         "close deblokkeerde de wachtende read niet"
     );
-    assert_eq!(net.a.tcp_read(c, &mut [0; 16], net.now), Err(Error::Closed));
+    assert_eq!(net.a.tcp_read(c, &mut [0; 16]), Err(Error::Closed));
 }
 
 #[test]
@@ -1102,16 +1088,12 @@ fn stack_close_sluit_alles() {
     let _conn = dial(&mut net, IP_B, 90, 5 * SEC).unwrap();
     net.run_for(50 * MS);
     net.b().close();
-    let now = net.now;
     assert!(
         accept_woke.count() > 0 && read_woke.count() > 0,
         "wachters bleven hangen na Stack::close"
     );
-    assert_eq!(net.b().tcp_accept(l, now), Err(Error::Closed));
-    assert_eq!(
-        net.b().udp_recv_from(u, &mut [0; 64], now),
-        Err(Error::Closed)
-    );
+    assert_eq!(net.b().tcp_accept(l), Err(Error::Closed));
+    assert_eq!(net.b().udp_recv_from(u, &mut [0; 64]), Err(Error::Closed));
     let b = net.b();
     assert!(
         b.pot.used == 0 && slots(b) == 0,
@@ -1200,10 +1182,7 @@ fn tcp_full_close_deadline_ruimt_end_to_end_op() {
     net.a.conn_mut(c.idx).unwrap().tcp.snd_wnd = 0;
     let now = net.now;
     let (w, woke) = counting_waker();
-    assert_eq!(
-        net.b().tcp_read(srv, &mut [0; 1], now),
-        Err(Error::WouldBlock)
-    );
+    assert_eq!(net.b().tcp_read(srv, &mut [0; 1]), Err(Error::WouldBlock));
     net.b().tcp_register_read_waker(srv, &w).unwrap();
 
     net.a.tcp_close(c, now).unwrap();
@@ -1221,10 +1200,7 @@ fn tcp_full_close_deadline_ruimt_end_to_end_op() {
     );
     net.run_for(20 * MS);
     assert_eq!(
-        {
-            let now = net.now;
-            net.b().tcp_read(srv, &mut [0; 1], now)
-        },
+        { net.b().tcp_read(srv, &mut [0; 1]) },
         Err(Error::WouldBlock),
         "peer-read eindigde vóór de RST"
     );
@@ -1233,13 +1209,7 @@ fn tcp_full_close_deadline_ruimt_end_to_end_op() {
     net.a.conn_mut(c.idx).unwrap().tcp.close_deadline = net.now - 1;
     net.settle();
     assert!(woke.count() > 0, "de RST wekte de peer-read niet");
-    assert_eq!(
-        {
-            let now = net.now;
-            net.b().tcp_read(srv, &mut [0; 1], now)
-        },
-        Err(Error::Reset)
-    );
+    assert_eq!({ net.b().tcp_read(srv, &mut [0; 1]) }, Err(Error::Reset));
     assert!(
         slots(&net.a) == 0 && net.a.pot.used == 0 && net.a.out.is_empty(),
         "na expiry: slots={} budget={} queued={}",
@@ -1290,11 +1260,11 @@ fn sock_staart_lezen_dan_sluiten() {
     let mut buf = [0u8; 64];
     let n = net
         .a
-        .tcp_read(c, &mut buf, net.now)
+        .tcp_read(c, &mut buf)
         .expect("CLOSE-WAIT hoort de staart te bewaren");
     assert_eq!(&buf[..n], b"staart");
     assert_eq!(
-        net.a.tcp_read(c, &mut buf, net.now),
+        net.a.tcp_read(c, &mut buf),
         Ok(0),
         "read na de staart hoort EOF te zijn"
     );
@@ -1312,15 +1282,12 @@ fn sock_staart_lezen_dan_sluiten() {
 fn stack_reap_wekt_geblokkeerde_read() {
     let mut net = Net::pair(1 << 20, 1 << 20);
     let (c, _, _) = connected(&mut net, 90);
-    assert_eq!(
-        net.a.tcp_read(c, &mut [0; 16], net.now),
-        Err(Error::WouldBlock)
-    );
+    assert_eq!(net.a.tcp_read(c, &mut [0; 16]), Err(Error::WouldBlock));
     let (w, woke) = counting_waker();
     net.a.tcp_register_read_waker(c, &w).unwrap();
     net.a.abort_and_reap(c.idx);
     assert!(woke.count() > 0, "reap wekte de geblokkeerde read niet");
-    let r = net.a.tcp_read(c, &mut [0; 16], net.now);
+    let r = net.a.tcp_read(c, &mut [0; 16]);
     assert_eq!(
         r,
         Err(Error::Reset),
@@ -1339,7 +1306,7 @@ fn stack_route_dood_breekt_de_verbinding() {
     let start = net.now;
     let mut res = Err(Error::WouldBlock);
     net.run_until(15 * SEC, |n| {
-        res = n.a.tcp_read(c, &mut [0; 16], n.now);
+        res = n.a.tcp_read(c, &mut [0; 16]);
         res != Err(Error::WouldBlock)
     });
     assert!(
@@ -1356,9 +1323,8 @@ fn stack_accept_na_close_geeft_nooit_een_verbinding() {
     dial(&mut net, IP_B, 90, 5 * SEC).unwrap();
     net.b().close();
     for i in 0..32 {
-        let now = net.now;
         assert_eq!(
-            net.b().tcp_accept(l, now),
+            net.b().tcp_accept(l),
             Err(Error::Closed),
             "accept #{i} na Stack::close"
         );
@@ -1519,7 +1485,7 @@ fn read_met_lege_buffer_keert_meteen_terug() {
     let mut net = Net::pair(1 << 20, 1 << 20);
     let (c, _, _) = connected(&mut net, 91);
     assert_eq!(
-        net.a.tcp_read(c, &mut [], net.now),
+        net.a.tcp_read(c, &mut []),
         Ok(0),
         "een lege read hoort meteen terug te keren"
     );
@@ -1624,7 +1590,7 @@ fn accept_ziet_snelle_sluiter() {
     let now = net.now;
     net.a.maybe_accept(i, now);
     assert!(
-        net.a.tcp_accept(l, now).is_ok(),
+        net.a.tcp_accept(l).is_ok(),
         "CLOSE-WAIT telt niet als aangekomen"
     );
 }
@@ -1652,7 +1618,7 @@ fn accept_slaat_gereapte_backlog_over() {
     let lst = net.a.listener_mut(l).unwrap();
     assert!(lst.push(stale) && lst.push(live));
     assert_eq!(
-        net.a.tcp_accept(l, net.now),
+        net.a.tcp_accept(l),
         Ok(live),
         "accept gaf een al gereapte backlogreferentie"
     );
@@ -2024,11 +1990,10 @@ fn jumbo_mss() {
     let mut got = Vec::new();
     let mut buf = vec![0u8; 128 << 10];
     let ok = net.run_until(5 * SEC, |n| {
-        let now = n.now;
-        if let Ok(k) = n.a.tcp_write(c, &msg[off..], now) {
+        if let Ok(k) = n.a.tcp_write(c, &msg[off..]) {
             off += k;
         }
-        while let Ok(k) = n.b().tcp_read(s, &mut buf, now) {
+        while let Ok(k) = n.b().tcp_read(s, &mut buf) {
             if k == 0 {
                 break;
             }
@@ -2129,8 +2094,7 @@ fn unacked_daalt_met_acks_naar_nul() {
     assert_eq!(net.a.tcp_unacked(c), Ok(0), "verse verbinding");
 
     let data = vec![7u8; 3000]; // Drie segmenten bij een MSS van 1460.
-    let now = net.now;
-    assert_eq!(net.a.tcp_write(c, &data, now), Ok(3000));
+    assert_eq!(net.a.tcp_write(c, &data), Ok(3000));
     assert_eq!(net.a.tcp_unacked(c), Ok(3000), "onverzonden telt mee");
 
     let (w, woke) = counting_waker();
@@ -2156,10 +2120,10 @@ fn unacked_fin_telt_tot_peer_ackt_en_time_wait_sluit_af() {
     let mut net = Net::pair(1 << 20, 1 << 20);
     let (c, s, _) = connected(&mut net, 7002);
     let now = net.now;
-    net.a.tcp_write(c, &[1u8; 100], now).unwrap();
+    net.a.tcp_write(c, &[1u8; 100]).unwrap();
     net.a.tcp_close(c, now).unwrap();
     // I/O is dicht, de bevraging niet: 100 bytes plus de FIN.
-    assert_eq!(net.a.tcp_write(c, &[1], now), Err(Error::Closed));
+    assert_eq!(net.a.tcp_write(c, &[1]), Err(Error::Closed));
     assert_eq!(net.a.tcp_unacked(c), Ok(101));
 
     // De draad is door: data en FIN gaan verloren, de teller blijft staan.
@@ -2186,8 +2150,8 @@ fn unacked_fin_telt_tot_peer_ackt_en_time_wait_sluit_af() {
     // De server leest de staart en EOF en sluit; a gaat naar TIME-WAIT.
     let now = net.now;
     let mut buf = [0u8; 256];
-    assert_eq!(net.b().tcp_read(s, &mut buf, now), Ok(100));
-    assert_eq!(net.b().tcp_read(s, &mut buf, now), Ok(0), "geen EOF");
+    assert_eq!(net.b().tcp_read(s, &mut buf), Ok(100));
+    assert_eq!(net.b().tcp_read(s, &mut buf), Ok(0), "geen EOF");
     net.b().tcp_close(s, now).unwrap();
     assert_eq!(net.b().tcp_unacked(s), Ok(1), "de FIN van b telt");
     // a adverteert na zijn close een nulvenster (zijn ontvangstring is terug),
@@ -2229,8 +2193,7 @@ fn unacked_blijft_hoog_bij_peer_die_niet_leest() {
     let data = vec![3u8; 256 << 10];
     let mut off = 0;
     net.run_until(3 * SEC, |n| {
-        let now = n.now;
-        if let Ok(k) = n.a.tcp_write(c, &data[off..], now) {
+        if let Ok(k) = n.a.tcp_write(c, &data[off..]) {
             off += k;
         }
         false
@@ -2263,8 +2226,7 @@ fn unacked_blijft_hoog_bij_peer_die_niet_leest() {
 fn unacked_reset_en_stack_close() {
     let mut net = Net::pair(1 << 20, 1 << 20);
     let (c, s, _) = connected(&mut net, 7005);
-    let now = net.now;
-    net.a.tcp_write(c, &[9u8; 500], now).unwrap();
+    net.a.tcp_write(c, &[9u8; 500]).unwrap();
     // b breekt de verbinding af; zijn pomp stuurt de RST.
     net.b().conns[s.idx].as_mut().unwrap().tcp.abort();
     net.settle();
@@ -2272,7 +2234,7 @@ fn unacked_reset_en_stack_close() {
 
     let (c2, _, _) = connected(&mut net, 7006);
     let now = net.now;
-    net.a.tcp_write(c2, &[9u8; 500], now).unwrap();
+    net.a.tcp_write(c2, &[9u8; 500]).unwrap();
     net.a.close();
     let mut frame = vec![0u8; 2048];
     assert_eq!(

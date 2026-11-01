@@ -268,10 +268,10 @@ impl Keeper {
     /// Voert één UDP-payload toe die op poort 68 binnenkwam.
     ///
     /// Alleen een ACK of NAK op de lopende poging telt; ander of laat verkeer
-    /// op poort 68 wordt genegeerd. Na elke payload hoort een poll. `_now`
-    /// houdt de vorm: een verlengde lease telt vanaf het REQUEST, niet vanaf
-    /// de ACK.
-    pub fn receive(&mut self, payload: &[u8], _now: Instant) {
+    /// op poort 68 wordt genegeerd. Na elke payload hoort een poll. Een
+    /// verlengde lease telt vanaf het REQUEST, niet vanaf de ACK, dus de
+    /// ontvangst kent geen klok.
+    pub fn receive(&mut self, payload: &[u8]) {
         let Phase::Waiting { state, sent, .. } = self.phase else {
             return;
         };
@@ -453,7 +453,7 @@ mod tests {
                     };
                     p.sent.push((to, payload.clone()));
                     for antwoord in server(kant, n, &payload) {
-                        k.receive(&antwoord, now);
+                        k.receive(&antwoord);
                     }
                     na_zenden = true;
                 }
@@ -630,7 +630,7 @@ mod tests {
         // De ACK komt vijf seconden later; de nieuwe T1 rekent vanaf t1.
         let laat = t1 + Duration::from_secs(5);
         for a in ack(&req, IP, &[]) {
-            k.receive(&a, laat);
+            k.receive(&a);
         }
         let mut next = None;
         for _ in 0..4 {
@@ -737,7 +737,7 @@ mod tests {
             panic!("geen renew op T1");
         };
         let antwoord = bootp_reply(payload, MSG_ACK, IP, &[51, 4, 0, 0, 0x1c, 0x20]);
-        k.receive(&antwoord, t1);
+        k.receive(&antwoord);
         let Ok(KeepAction::Event(Event::Extended { lease: got, .. })) = k.poll(t1) else {
             panic!("de ACK verlengde de lease niet");
         };

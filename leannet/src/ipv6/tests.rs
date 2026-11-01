@@ -116,18 +116,18 @@ fn ndp_two_stacks_udp_roundtrip_and_loopback() {
     assert_eq!(a.udp6_send_to(ah, to, b"request", NOW), Ok(7));
     pump(&mut a, &mut b, NOW);
     let mut buf = [0; 30];
-    let (n, from) = b.udp6_recv_from(bh, &mut buf, NOW).unwrap();
+    let (n, from) = b.udp6_recv_from(bh, &mut buf).unwrap();
     assert_eq!(&buf[..n], b"request");
     b.udp6_send_to(bh, from, b"reply", NOW).unwrap();
     pump(&mut a, &mut b, NOW);
-    assert_eq!(a.udp6_recv_from(ah, &mut buf, NOW).unwrap().0, 5);
+    assert_eq!(a.udp6_recv_from(ah, &mut buf).unwrap().0, 5);
     let own = Endpoint6 {
         ip: w::link_local(MAC_A),
         port: a.udp6_local(ah).unwrap().port,
     };
     a.udp6_send_to(ah, own, b"self", NOW).unwrap();
     pump(&mut a, &mut b, NOW);
-    assert_eq!(a.udp6_recv_from(ah, &mut buf, NOW).unwrap().0, 4);
+    assert_eq!(a.udp6_recv_from(ah, &mut buf).unwrap().0, 4);
 }
 #[test]
 fn multicast_requires_join_and_returns_local_copy() {
@@ -148,8 +148,8 @@ fn multicast_requires_join_and_returns_local_copy() {
     .unwrap();
     pump(&mut a, &mut b, NOW);
     let mut buf = [0; 20];
-    assert_eq!(a.udp6_recv_from(ah, &mut buf, NOW).unwrap().0, 5);
-    assert_eq!(b.udp6_recv_from(bh, &mut buf, NOW), Err(Error::WouldBlock));
+    assert_eq!(a.udp6_recv_from(ah, &mut buf).unwrap().0, 5);
+    assert_eq!(b.udp6_recv_from(bh, &mut buf), Err(Error::WouldBlock));
     b.join_group6(GROUP, NOW).unwrap();
     a.udp6_send_to(
         ah,
@@ -162,7 +162,7 @@ fn multicast_requires_join_and_returns_local_copy() {
     )
     .unwrap();
     pump(&mut a, &mut b, NOW);
-    assert_eq!(b.udp6_recv_from(bh, &mut buf, NOW).unwrap().0, 5);
+    assert_eq!(b.udp6_recv_from(bh, &mut buf).unwrap().0, 5);
 }
 #[test]
 fn families_rebind_generation_and_budget() {
@@ -175,11 +175,8 @@ fn families_rebind_generation_and_budget() {
     s.udp6_close(v6);
     assert!(c.count() > 0);
     let again = s.udp6_bind(5353, NOW).unwrap();
-    assert_eq!(s.udp6_recv_from(v6, &mut [0; 1], NOW), Err(Error::Closed));
-    assert_eq!(
-        s.udp6_recv_from(again, &mut [0; 1], NOW),
-        Err(Error::WouldBlock)
-    );
+    assert_eq!(s.udp6_recv_from(v6, &mut [0; 1]), Err(Error::Closed));
+    assert_eq!(s.udp6_recv_from(again, &mut [0; 1]), Err(Error::WouldBlock));
     s.udp6_close(again);
     s.udp_close(v4);
     assert_eq!(s.budget_free(), free);
@@ -408,12 +405,9 @@ fn zero_udp_checksum_and_truncated_frames_are_rejected() {
     let mut bad = good.clone();
     bad[60..62].fill(0);
     s.receive(&bad, NOW).unwrap();
-    assert_eq!(
-        s.udp6_recv_from(h, &mut [0; 2], NOW),
-        Err(Error::WouldBlock)
-    );
+    assert_eq!(s.udp6_recv_from(h, &mut [0; 2]), Err(Error::WouldBlock));
     s.receive(&good, NOW).unwrap();
-    assert_eq!(s.udp6_recv_from(h, &mut [0; 2], NOW).unwrap().0, 1);
+    assert_eq!(s.udp6_recv_from(h, &mut [0; 2]).unwrap().0, 1);
 }
 #[test]
 fn caps_and_bounded_ra_lifetime() {
@@ -468,12 +462,9 @@ fn multicast_requires_exact_ethernet_mapping() {
     let mut bad = good.clone();
     bad[..6].copy_from_slice(&MAC_A);
     s.receive(&bad, NOW).unwrap();
-    assert_eq!(
-        s.udp6_recv_from(h, &mut [0; 2], NOW),
-        Err(Error::WouldBlock)
-    );
+    assert_eq!(s.udp6_recv_from(h, &mut [0; 2]), Err(Error::WouldBlock));
     s.receive(&good, NOW).unwrap();
-    assert_eq!(s.udp6_recv_from(h, &mut [0; 2], NOW).unwrap().0, 1);
+    assert_eq!(s.udp6_recv_from(h, &mut [0; 2]).unwrap().0, 1);
 }
 #[test]
 fn old_router_withdrawal_cannot_erase_replacement_and_expiry_wakes() {
@@ -549,7 +540,7 @@ fn independent_go_codec_fixtures_deliver_udp_and_install_thread_route() {
     s.receive(include_bytes!("../../testdata/ipv6/udp.bin"), NOW)
         .unwrap();
     let mut buf = [0; 32];
-    let (n, peer) = s.udp6_recv_from(h, &mut buf, NOW).unwrap();
+    let (n, peer) = s.udp6_recv_from(h, &mut buf).unwrap();
     assert_eq!(&buf[..n], b"Go IPv6 fixture");
     assert_eq!(peer.port, 5540);
     s.receive(include_bytes!("../../testdata/ipv6/ra.bin"), NOW)

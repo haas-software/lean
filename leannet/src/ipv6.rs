@@ -732,13 +732,7 @@ impl Stack {
         Ok(Endpoint6 { ip, port })
     }
     /// Ontvangt één volledig record; een korte buffer kapt uitsluitend dat record af.
-    /// `_now` houdt de vorm van de IPv4-tegenhanger.
-    pub fn udp6_recv_from(
-        &mut self,
-        h: Udp6Handle,
-        buf: &mut [u8],
-        _now: u64,
-    ) -> Result<(usize, Endpoint6)> {
+    pub fn udp6_recv_from(&mut self, h: Udp6Handle, buf: &mut [u8]) -> Result<(usize, Endpoint6)> {
         let (n, ip, port) = self.udp6_port(h)?.recv_from(buf).ok_or(Error::WouldBlock)?;
         Ok((n, Endpoint6 { ip, port }))
     }

@@ -119,9 +119,8 @@ impl Stack {
     ///
     /// Een peer kan resetten, of [`Stack::abort_peer`] de verbinding
     /// opruimen terwijl ze in de rij staat; zo'n verouderde entry komt nooit
-    /// bij de applicatie. `_now` houdt de vorm van de andere calls; sinds de
-    /// CLOSE-WAIT-grens weg is (01-11-2026), kent accept geen klok.
-    pub fn tcp_accept(&mut self, h: ListenHandle, _now: u64) -> Result<TcpHandle> {
+    /// bij de applicatie.
+    pub fn tcp_accept(&mut self, h: ListenHandle) -> Result<TcpHandle> {
         loop {
             let c = self.listener_mut(h).ok_or(Error::Closed)?.pop();
             let Some(c) = c else {
@@ -306,9 +305,8 @@ impl Stack {
     ///
     /// `Ok(0)` bij een lege `buf`, of bij EOF na de FIN van de peer.
     /// [`Error::WouldBlock`] als er nog niets is; registreer dan
-    /// [`Stack::tcp_register_read_waker`]. `_now` houdt de vorm, zoals bij
-    /// [`Stack::tcp_accept`].
-    pub fn tcp_read(&mut self, h: TcpHandle, buf: &mut [u8], _now: u64) -> Result<usize> {
+    /// [`Stack::tcp_register_read_waker`].
+    pub fn tcp_read(&mut self, h: TcpHandle, buf: &mut [u8]) -> Result<usize> {
         let c = self.sock(h)?;
         if buf.is_empty() {
             // `net.Conn` eist dat een lege read meteen terugkeert.
@@ -345,8 +343,7 @@ impl Stack {
     ///
     /// [`Error::WouldBlock`] als de zendring vol is en niet kan groeien;
     /// registreer dan [`Stack::tcp_register_write_waker`] en wacht op ACK-ruimte.
-    /// `_now` houdt de vorm, zoals bij [`Stack::tcp_accept`].
-    pub fn tcp_write(&mut self, h: TcpHandle, data: &[u8], _now: u64) -> Result<usize> {
+    pub fn tcp_write(&mut self, h: TcpHandle, data: &[u8]) -> Result<usize> {
         let pot = &mut self.pot;
         let c = self
             .conns
@@ -521,14 +518,8 @@ impl Stack {
     }
 
     /// Haalt het oudste datagram op: lengte en afzender. Is `buf` te klein,
-    /// dan valt de rest weg (UDP-semantiek). `_now` houdt de vorm van de
-    /// andere calls; een UDP-read kent geen klok.
-    pub fn udp_recv_from(
-        &mut self,
-        h: UdpHandle,
-        buf: &mut [u8],
-        _now: u64,
-    ) -> Result<(usize, Endpoint)> {
+    /// dan valt de rest weg (UDP-semantiek).
+    pub fn udp_recv_from(&mut self, h: UdpHandle, buf: &mut [u8]) -> Result<(usize, Endpoint)> {
         let (n, ip, port) = self.udp_port(h)?.recv_from(buf).ok_or(Error::WouldBlock)?;
         Ok((n, Endpoint { ip, port }))
     }
