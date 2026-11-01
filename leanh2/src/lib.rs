@@ -132,7 +132,7 @@ const OUR_MAX_FRAME: usize = 1 << 14;
 /// Onze grens op een gedecodeerde koplijst.
 const OUR_MAX_HEADER_LIST: usize = 1 << 16;
 /// Hoeveel streams tegelijk.
-pub const MAX_CONCURRENT_STREAMS: usize = 32;
+pub(crate) const MAX_CONCURRENT_STREAMS: usize = 32;
 /// De grens op de gecomprimeerde bytes van één header-blok.
 const MAX_COMPRESSED_HEADERS: usize = 64 << 10;
 /// Eén keer bovenop het standaardvenster van de verbinding. Dat begrenst alle
@@ -409,8 +409,6 @@ pub enum Error {
     StreamClosed,
     /// De verbinding eindigde.
     ConnectionClosed,
-    /// De handler sloot de body zelf.
-    BodyClosed,
     /// Een antwoordstatus buiten 200..=599.
     StatusOutOfRange {
         /// De status.
@@ -546,7 +544,6 @@ impl fmt::Display for Error {
             Self::StreamReset => f.write_str("the peer reset this stream"),
             Self::StreamClosed => f.write_str("stream closed"),
             Self::ConnectionClosed => f.write_str("the connection ended"),
-            Self::BodyClosed => f.write_str("body closed by the handler"),
             Self::StatusOutOfRange { status } => {
                 write!(f, "response status {status} is outside 200..599")
             }

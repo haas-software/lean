@@ -1352,38 +1352,6 @@ fn adversarial_peer_eof_releases_blocked_credit_write() {
 }
 
 #[test]
-fn adversarial_close_after_body_eof_stays_clean() {
-    let served: Rc<Cell<Option<bool>>> = Rc::default();
-    let s = served.clone();
-    let mut p = new_peer(handler(move |mut req, mut res| {
-        let s = s.clone();
-        Box::pin(async move {
-            let r = read_all(&mut req.body).await;
-            req.body.close();
-            res.write_header(204, &[])?;
-            s.set(Some(r.is_ok()));
-            Ok(())
-        })
-    }));
-    p.handshake(None);
-    p.frame(
-        FRAME_HEADERS,
-        FLAG_END_HEADERS,
-        1,
-        &header_block("/clean-close"),
-    );
-    p.frame(FRAME_DATA, FLAG_END_STREAM, 1, b"body");
-    assert_eq!(served.get(), Some(true));
-    p.frame(FRAME_PING, 0, 0, b"abcdefgh");
-    for (typ, _, stream, _) in p.drain() {
-        assert!(
-            !(typ == FRAME_RST_STREAM && stream == 1),
-            "lezen tot het einde plus Body.close gaf RST_STREAM"
-        );
-    }
-}
-
-#[test]
 fn adversarial_first_peer_frame_must_be_settings() {
     let mut p = new_peer_with_settings(idle(), false);
     p.read_until(FRAME_SETTINGS);
@@ -1811,6 +1779,16 @@ fn goaway_frame(last: u32, code: u32, debug: &[u8]) -> Vec<u8> {
 // De client tegen de eigen server: verzoek met body en velden, een antwoord
 // groter dan het standaardvenster (dat kan alleen met ons krediet), en de
 // beleefde GOAWAY aan het eind.
+/// De eerste waarde van een antwoordveld, zoals een gebruiker hem uit
+/// `header` haalt.
+fn field<'r>(response: &'r crate::client::Response, name: &str) -> Option<&'r str> {
+    response
+        .header
+        .iter()
+        .find(|(n, _)| n == name)
+        .map(|(_, v)| v.as_str())
+}
+
 #[test]
 fn client_round_trip_with_own_server() {
     type Seen = (String, String, String, String, Option<String>, Vec<u8>);
@@ -1879,7 +1857,7 @@ fn client_round_trip_with_own_server() {
         .unwrap_or_else(|e| panic!("{e}"));
     assert_eq!(response.status, 200);
     assert_eq!(
-        response.get("apns-id"),
+        field(&response, "apns-id"),
         Some("eabeae54-14a8-11e5-b60b-1697f925ec7b")
     );
     assert!(response.body == answer, "antwoordbody verschilt");
@@ -1922,8 +1900,8 @@ fn client_reads_huffman_continuation_and_interim() {
     let (outcome, written) = scripted(&script, &PUSH, &client::Limits::default());
     let response = outcome.unwrap_or_else(|e| panic!("{e}"));
     assert_eq!(response.status, 200);
-    assert_eq!(response.get("apns-id"), Some("eabeae54-14a8-11e5"));
-    assert_eq!(response.get("x-reden"), Some("Gelukt, met spaties"));
+    assert_eq!(field(&response, "apns-id"), Some("eabeae54-14a8-11e5"));
+    assert_eq!(field(&response, "x-reden"), Some("Gelukt, met spaties"));
     assert_eq!(response.body, b"hello");
 
     let kinds: Vec<(u8, u8, u32)> = written.iter().map(|f| (f.0, f.1, f.2)).collect();
@@ -2257,7 +2235,7 @@ fn client_refuses_malformed_responses() {
         (response.status, response.body.as_slice()),
         (200, &b"ok"[..])
     );
-    assert_eq!(response.get("x-check"), None);
+    assert_eq!(field(&response, "x-check"), None);
 }
 
 // Een verzoek dat zo niet de draad op kan, faalt vóór de eerste byte.

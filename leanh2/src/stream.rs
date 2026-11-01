@@ -35,15 +35,10 @@ pub(crate) struct Slot {
     /// Waar het ongelezen deel van `body` begint.
     pub(crate) body_pos: usize,
     /// `None` zolang de body open is, `Some(Ok)` na een schone END_STREAM,
-    /// `Some(Err)` na een reset, afbreken of sluiten door de handler.
+    /// `Some(Err)` na een reset of afbreken.
     pub(crate) body_end: Option<Result>,
     /// Bytes die de handler las en waarvoor nog krediet terug moet.
     pub(crate) consumed: u32,
-    /// Bytes die de handler met [`Body::close`] weggooide; alleen
-    /// verbindingskrediet, want de stream krijgt niets meer.
-    pub(crate) discarded: u32,
-    /// De handler sloot de body.
-    pub(crate) body_closed: bool,
     /// Een gecodeerd kopblok dat op de draad wacht.
     pub(crate) header: Option<Vec<u8>>,
     /// De handler heeft zijn koppen gegeven.
@@ -180,19 +175,6 @@ impl Body<'_> {
     /// eindigt is een fout, nooit een einde.
     pub fn read<'a>(&'a mut self, buf: &'a mut [u8]) -> impl Future<Output = Result<usize>> + 'a {
         poll_fn(move |_| self.mb.with(|s| s.poll_read(buf)))
-    }
-
-    /// Stopt de interesse van de handler in de body. Gebufferde bytes worden
-    /// weggegooid en gecrediteerd; het afronden van het antwoord zegt de peer
-    /// dat hij met de rest kan stoppen.
-    pub fn close(&mut self) {
-        self.mb.with(|s| {
-            s.body_closed = true;
-            let n = s.discard(Error::BodyClosed);
-            s.discarded = s
-                .discarded
-                .saturating_add(u32::try_from(n).unwrap_or(u32::MAX));
-        });
     }
 }
 

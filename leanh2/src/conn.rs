@@ -72,11 +72,6 @@ where
         }
     }
 
-    /// Geeft transport en handler terug, bijvoorbeeld om te inspecteren.
-    pub fn into_inner(self) -> (T, H) {
-        (self.io, self.handler)
-    }
-
     /// Leest de preface, wisselt SETTINGS uit en bedient frames tot de
     /// verbinding eindigt; geeft de reden. Een `Conn` bedient precies één keer.
     ///
@@ -140,8 +135,6 @@ struct Wire {
     expected: Option<u64>,
     /// Ontvangen bodybytes zonder opvulling.
     received: u64,
-    /// De handler sloot de body: de stream krijgt geen krediet meer.
-    discarding: bool,
     /// De antwoordkoppen staan op de draad.
     header_out: bool,
     /// De handler is klaar: `Some(true)` netjes, `Some(false)` met een fout.
@@ -624,7 +617,6 @@ impl State {
                 remote_ended: flags & FLAG_END_STREAM != 0,
                 expected: None,
                 received: 0,
-                discarding: false,
                 header_out: false,
                 done: None,
             });
@@ -794,13 +786,7 @@ impl State {
         w.received = next;
         w.remote_ended |= end;
         w.recv_win -= n;
-        let discarding = w.discarding;
         self.recv_win -= n;
-        if discarding {
-            // De handler sloot de body: weggooien en alleen de verbinding
-            // crediteren. Een nette peer stopt dan bij zijn bestaande venster.
-            return self.credit(None, n);
-        }
         let mb = boxes.get(i).ok_or(Error::StreamClosed)?;
         let delivered = mb.with(|s| {
             if s.body_end.is_some() {
@@ -859,23 +845,12 @@ impl State {
         for k in 0..MAX_CONCURRENT_STREAMS {
             let i = (self.rr + k) % MAX_CONCURRENT_STREAMS;
             let Some(mb) = boxes.get(i) else { continue };
-            let (consumed, discarded, closed) = mb.with(|s| {
-                (
-                    core::mem::take(&mut s.consumed),
-                    core::mem::take(&mut s.discarded),
-                    s.body_closed,
-                )
-            });
+            let consumed = mb.with(|s| core::mem::take(&mut s.consumed));
             if consumed > 0 {
                 progress = true;
                 self.credit(Some(i), i64::from(consumed))?;
             }
-            if discarded > 0 {
-                progress = true;
-                self.credit(None, i64::from(discarded))?;
-            }
-            let Some(w) = self.wire_mut(i) else { continue };
-            w.discarding |= closed;
+            let Some(w) = self.wire(i) else { continue };
             let id = w.id;
             if let Some(block) = mb.with(|s| s.header.take()) {
                 self.header_block(id, &block)?;
@@ -1002,9 +977,7 @@ impl State {
         }
         let Some(mb) = boxes.get(i) else { return 0 };
         mb.with(|s| {
-            let n = s.discard(why) as i64
-                + i64::from(core::mem::take(&mut s.consumed))
-                + i64::from(core::mem::take(&mut s.discarded));
+            let n = s.discard(why) as i64 + i64::from(core::mem::take(&mut s.consumed));
             s.gone.get_or_insert(why);
             s.data.clear();
             s.header = None;
@@ -1026,16 +999,13 @@ impl State {
         }
     }
 
-    /// Stuurt WINDOW_UPDATE voor verbruikte of bewust weggegooide bytes; met
-    /// `Some(i)` ook op die stream, tenzij hij geen krediet meer krijgt.
+    /// Stuurt WINDOW_UPDATE voor verbruikte of weggegooide bytes; met
+    /// `Some(i)` ook op die stream.
     fn credit(&mut self, i: Option<usize>, n: i64) -> Result {
         if n <= 0 {
             return Ok(());
         }
-        let stream = i
-            .and_then(|i| self.wire(i))
-            .filter(|w| !w.discarding)
-            .map(|w| (w.id, w.recv_win));
+        let stream = i.and_then(|i| self.wire(i)).map(|w| (w.id, w.recv_win));
         let over_stream = stream.is_some_and(|(_, win)| win + n > WINDOW_MAX);
         if self.recv_win + n > WINDOW_MAX || over_stream {
             return Err(Error::CreditOverflow);

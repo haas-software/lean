@@ -99,16 +99,6 @@ pub struct Response {
     pub body: Vec<u8>,
 }
 
-impl Response {
-    /// De eerste waarde van een veld (naam in kleine letters), als die er is.
-    pub fn get(&self, name: &str) -> Option<&str> {
-        self.header
-            .iter()
-            .find(|(n, _)| n == name)
-            .map(|(_, v)| v.as_str())
-    }
-}
-
 /// Waarom [`send`] geen antwoord gaf.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SendError<E> {
