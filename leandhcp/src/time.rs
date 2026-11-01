@@ -20,11 +20,6 @@ impl Instant {
     /// De oorsprong van de klok.
     pub const ZERO: Self = Self(Duration::ZERO);
 
-    /// Het tijdstip `ms` milliseconden na de oorsprong.
-    pub const fn from_millis(ms: u64) -> Self {
-        Self(Duration::from_millis(ms))
-    }
-
     /// Het tijdstip `d` na de oorsprong.
     pub const fn from_duration(d: Duration) -> Self {
         Self(d)
@@ -59,7 +54,7 @@ mod tests {
     fn instant_verzadigt() {
         let end = Instant::from_duration(Duration::MAX);
         assert_eq!(end + Duration::from_secs(1), end);
-        let a = Instant::from_millis(5);
+        let a = Instant::from_duration(Duration::from_millis(5));
         assert_eq!(a.saturating_duration_since(end), Duration::ZERO);
         assert_eq!(end.saturating_duration_since(Instant::ZERO), Duration::MAX);
     }

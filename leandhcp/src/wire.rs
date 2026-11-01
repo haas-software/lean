@@ -46,7 +46,7 @@ const BOOTP_AT: usize = ETH_LEN + IP_LEN + UDP_LEN;
 
 /// Lengte van elk frame dat de [`Client`](crate::Client) zendt: ethernet, IPv4,
 /// UDP en 300 bytes BOOTP.
-pub const FRAME_LEN: usize = BOOTP_AT + BOOTP_LEN;
+pub(crate) const FRAME_LEN: usize = BOOTP_AT + BOOTP_LEN;
 
 /// Parameter-request (optie 55): mask, router, DNS, lease, T1 en T2.
 const PARAMS: [u8; 6] = [1, 3, 6, 51, 58, 59];

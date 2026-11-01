@@ -27,9 +27,9 @@ pub struct Lease {
     pub server: Ipv4Addr,
     /// Looptijd in seconden (optie 51); `0xFFFF_FFFF` is oneindig.
     pub lease_secs: u32,
-    /// Renew-tijd T1 in seconden (optie 58); zie [`Lease::timers`].
+    /// Renew-tijd T1 in seconden (optie 58); de [`Keeper`](crate::Keeper) plant erop.
     pub t1_secs: u32,
-    /// Rebind-tijd T2 in seconden (optie 59); zie [`Lease::timers`].
+    /// Rebind-tijd T2 in seconden (optie 59); de [`Keeper`](crate::Keeper) plant erop.
     pub t2_secs: u32,
 }
 
@@ -50,13 +50,13 @@ impl Default for Lease {
 
 /// De drie momenten van een lease, gerekend vanaf de ontvangst van de ACK.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Timers {
+pub(crate) struct Timers {
     /// Vanaf hier renewen we unicast bij de lessor.
-    pub t1: Duration,
+    pub(crate) t1: Duration,
     /// Vanaf hier rebinden we per broadcast bij elke server.
-    pub t2: Duration,
+    pub(crate) t2: Duration,
     /// Vanaf hier is het adres niet meer van ons.
-    pub expiry: Duration,
+    pub(crate) expiry: Duration,
 }
 
 /// Een adres met prefixlengte, zoals `192.168.1.33/24`.
@@ -89,7 +89,7 @@ impl Lease {
     /// Een ongeldige volgorde valt terug op de RFC 2131-verhoudingen 0,5 en
     /// 0,875. Echte routers hebben T1 = T2 = looptijd gestuurd, en dat wist de
     /// rebind-fase uit; daarom geldt steeds 0 < T1 < T2 < looptijd.
-    pub fn timers(&self) -> Option<Timers> {
+    pub(crate) fn timers(&self) -> Option<Timers> {
         if self.lease_secs == 0 || self.lease_secs == u32::MAX {
             return None;
         }

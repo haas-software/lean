@@ -103,7 +103,6 @@ pub struct Client {
     deadline: Instant,
     round: u32,
     xid: u32,
-    rx_errors: u32,
     phase: Phase,
     frame: [u8; FRAME_LEN],
 }
@@ -117,7 +116,6 @@ impl Client {
             deadline: now + timeout,
             round: 0,
             xid: 0,
-            rx_errors: 0,
             phase: Phase::Start,
             frame: [0; FRAME_LEN],
         }
@@ -134,7 +132,6 @@ impl Client {
                     if now >= self.deadline {
                         let err = Error::NoLease {
                             timeout: self.timeout,
-                            rx_errors: self.rx_errors,
                         };
                         self.phase = Phase::Failed(err);
                         return Err(err);
@@ -199,14 +196,6 @@ impl Client {
         }
     }
 
-    /// Meldt dat de NIC een ontvangstfout gaf.
-    ///
-    /// Zo'n fout is per frame niet fataal, maar telt mee in de eindfout: een
-    /// kapotte NIC mag niet als "geen server" worden gemeld.
-    pub fn receive_failed(&mut self) {
-        self.rx_errors = self.rx_errors.saturating_add(1);
-    }
-
     /// Meldt dat zenden faalde; de volgende poll geeft [`Error::Transmit`].
     ///
     /// Een lease die al binnen is, blijft staan.
@@ -256,7 +245,7 @@ mod tests {
     use std::collections::VecDeque;
 
     const MAC: [u8; 6] = [2, 0, 0, 0, 0, 1];
-    const T0: Instant = Instant::from_millis(1_000_000);
+    const T0: Instant = Instant::from_duration(Duration::from_secs(1_000));
 
     /// Een nagebootste NIC met een klok: frames komen binnen op een tijdstip.
     #[derive(Default)]
@@ -264,7 +253,6 @@ mod tests {
         now: Instant,
         rx: VecDeque<(Instant, Vec<u8>)>,
         tx: Vec<Vec<u8>>,
-        rx_err: bool,
         tx_err: bool,
         flood: Option<Vec<u8>>,
     }
@@ -324,9 +312,6 @@ mod tests {
                     }
                 }
                 Ok(Action::Wait(until)) => {
-                    if nic.rx_err {
-                        c.receive_failed();
-                    }
                     match nic.receive() {
                         Some(f) => c.receive(&f, nic.now),
                         None => {
@@ -422,24 +407,6 @@ mod tests {
         assert!(
             elapsed <= Duration::from_secs(3),
             "Acquire duurde {elapsed:?} op 200ms"
-        );
-    }
-
-    #[test]
-    fn acquire_nic_fout() {
-        let mut nic = Nic {
-            rx_err: true,
-            ..Nic::default()
-        };
-        let (res, _) = acquire(&mut nic, None, Duration::from_millis(150));
-        match res {
-            Err(Error::NoLease { rx_errors, .. }) if rx_errors > 0 => {}
-            other => panic!("{other:?}: de RX-fout van de NIC hoort mee naar boven"),
-        }
-        let err = res.unwrap_err().to_string();
-        assert!(
-            err.contains("NIC receive errors") && !err.contains("no server"),
-            "{err}"
         );
     }
 

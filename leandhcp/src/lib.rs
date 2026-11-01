@@ -27,7 +27,7 @@
 //! use core::time::Duration;
 //! use leandhcp::{Action, Client, Instant};
 //!
-//! let mut now = Instant::from_millis(0);
+//! let mut now = Instant::ZERO;
 //! let mut client = Client::new([2, 0, 0, 0, 0, 1], now, Duration::from_millis(500));
 //! let err = loop {
 //!     match client.poll(now) {
@@ -63,9 +63,9 @@ mod testutil;
 
 pub use client::{Action, Client};
 pub use keeper::{Event, KeepAction, Keeper, State};
-pub use lease::{Cidr, Lease, Timers};
+pub use lease::{Cidr, Lease};
 pub use time::Instant;
-pub use wire::{CLIENT_PORT, FRAME_LEN, SERVER_PORT};
+pub use wire::{CLIENT_PORT, SERVER_PORT};
 
 use core::fmt;
 use core::net::Ipv4Addr;
@@ -85,9 +85,6 @@ pub enum Error {
     NoLease {
         /// De totale time-out die de aanroeper gaf.
         timeout: Duration,
-        /// Hoeveel ontvangstfouten de NIC meldde. Niet nul betekent: een kapotte
-        /// NIC, geen afwezige server.
-        rx_errors: u32,
     },
     /// De aanroeper meldde dat zenden faalde; verder pollen heeft dan geen zin.
     Transmit,
@@ -116,17 +113,9 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
-            Self::NoLease {
-                timeout,
-                rx_errors: 0,
-            } => write!(
+            Self::NoLease { timeout } => write!(
                 f,
                 "dhcp: no lease within {} ms (no server answered)",
-                timeout.as_millis()
-            ),
-            Self::NoLease { timeout, rx_errors } => write!(
-                f,
-                "dhcp: no lease within {} ms; {rx_errors} NIC receive errors",
                 timeout.as_millis()
             ),
             Self::Transmit => f.write_str("dhcp: TX failed"),

@@ -201,18 +201,6 @@ impl Keeper {
         &self.lease
     }
 
-    /// De RFC 2131-toestand van de lease.
-    pub fn state(&self) -> State {
-        match self.phase {
-            Phase::Bound(_) | Phase::Done => State::Bound,
-            Phase::Attempt(state, _)
-            | Phase::Waiting { state, .. }
-            | Phase::Backoff { state, .. } => state,
-            Phase::Rebind(_) => State::Rebinding,
-            Phase::Lost(_) => State::Expired,
-        }
-    }
-
     /// Zegt wat er nu moet gebeuren.
     ///
     /// Geeft een fout als het adres niet meer van ons is: [`Error::Refused`]
@@ -404,7 +392,7 @@ mod tests {
     use std::fmt::Write as _;
 
     const MAC: [u8; 6] = [2, 0, 0, 0, 0, 1];
-    const T0: Instant = Instant::from_millis(5_000_000);
+    const T0: Instant = Instant::from_duration(Duration::from_secs(5_000));
 
     /// Wat een nagebootste run van de keeper liet zien.
     #[derive(Default)]
@@ -751,7 +739,6 @@ mod tests {
             "de karige ACK wiste velden"
         );
         assert_eq!(*k.lease(), got);
-        assert_eq!(k.state(), State::Bound);
     }
 
     #[test]
@@ -812,6 +799,5 @@ mod tests {
             }))
         ));
         assert!(matches!(k.poll(t1), Ok(KeepAction::Wait(_))));
-        assert_eq!(k.state(), State::Renewing);
     }
 }
