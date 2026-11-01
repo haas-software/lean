@@ -5,8 +5,9 @@
 //! keep-alive-verbinding per [`Http`] (een verbinding draagt één verzoek
 //! tegelijk; wie tegelijk wil, neemt er meer en gebruikt
 //! [`leans3::Client::get_to_all`]), nooit een redirect (de handtekening dekt
-//! host en pad), en voor GET en HEAD een paar herkansingen met een
-//! oplopende wachttijd.
+//! host en pad), en nooit een herkansing: elk verzoek is één poging, en een
+//! 5xx, een 429 of een gebroken verbinding gaat terug naar de aanroeper. Of
+//! en wanneer het opnieuw mag, is applicatiecode (besluit L2, 01-11-2026).
 //!
 //! De body stroomt: [`Reply`] leest hem van de verbinding terwijl de
 //! aanroeper leest, dus een object van honderden MB kost niet meer geheugen
@@ -16,7 +17,7 @@
 //! zodat een lange download zo lang mag duren als hij vordert.
 //!
 //! De klok is van de aanroeper ([`Clock`]): de pool rekent er de leeftijd van
-//! verbindingen mee, en de termijn en de herkansing wachten erop.
+//! verbindingen mee, en de termijn wacht erop.
 
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(
@@ -64,21 +65,15 @@ pub struct Limits {
     /// Voortgangstermijn van de body: zo lang mag één read zonder bytes
     /// duren.
     pub progress: Duration,
-    /// Pogingen voor GET en HEAD, de eerste meegeteld; nooit minder dan één.
-    pub attempts: u32,
-    /// De grootste foutbody die bij een herkansing gelezen wordt.
-    pub error_body: usize,
 }
 
 impl Default for Limits {
-    /// 60 s tot de kop, 30 s op de kop, 30 s voortgang, vier pogingen.
+    /// 60 s tot de kop, 30 s op de kop, 30 s voortgang.
     fn default() -> Self {
         Self {
             deadline: Duration::from_secs(60),
             header: Duration::from_secs(30),
             progress: Duration::from_secs(30),
-            attempts: 4,
-            error_body: 64 << 10,
         }
     }
 }
@@ -133,7 +128,7 @@ impl<D: Dial, K: Clock + Clone> Http<D, K> {
         self
     }
 
-    /// De HTTP-fout van de laatste mislukte poging, met meer detail dan
+    /// De HTTP-fout van het laatste mislukte verzoek, met meer detail dan
     /// [`IoError`] kan dragen.
     pub fn last_error(&self) -> Option<leanhttp::Error> {
         self.last_error
@@ -157,7 +152,7 @@ impl<D: Dial, K: Clock + Clone> Http<D, K> {
         }
     }
 
-    /// Eén poging tot en met de kop, binnen [`Limits::deadline`].
+    /// Het verzoek tot en met de kop, binnen [`Limits::deadline`].
     async fn attempt(
         &mut self,
         request: &Parts<'_>,
@@ -200,14 +195,6 @@ impl<D: Dial, K: Clock + Clone> Http<D, K> {
         })
         .await
     }
-
-    /// Leest een korte foutbody en geeft de verbinding terug, vóór een
-    /// herkansing.
-    async fn drain(&mut self, mut response: leanhttp::Response<D::Conn>) {
-        if response.read_to_end(self.limits.error_body).await.is_ok() {
-            self.client.finish(response, self.clock.now()).await;
-        }
-    }
 }
 
 /// Wat van een [`Request`] over is zonder zijn gestroomde body.
@@ -216,23 +203,6 @@ struct Parts<'a> {
     url: &'a str,
     headers: &'a [leans3::Header],
     bytes: Option<&'a [u8]>,
-}
-
-/// Statussen waarop een GET of HEAD het opnieuw mag proberen.
-fn busy(status: u16) -> bool {
-    matches!(status, 429 | 500 | 502 | 503 | 504)
-}
-
-/// Fouten waarop een GET of HEAD het opnieuw mag proberen: de verbinding,
-/// niet het antwoord.
-fn broken(error: &leanhttp::Error) -> bool {
-    matches!(
-        error,
-        leanhttp::Error::Connect
-            | leanhttp::Error::Io(_)
-            | leanhttp::Error::Eof
-            | leanhttp::Error::UnexpectedEof
-    )
 }
 
 fn io(error: leanhttp::Error) -> IoError {
@@ -263,12 +233,6 @@ impl<D: Dial, K: Clock + Clone + Unpin> leans3::Transport for Http<D, K> {
             .try_reserve_exact(request.target.len())
             .map_err(|_| IoError::Other("leans3http: out of memory"))?;
         target.push_str(request.target);
-        let replay = matches!(request.method, "GET" | "HEAD");
-        let attempts = if replay {
-            self.limits.attempts.max(1)
-        } else {
-            1
-        };
         let (bytes, mut upload) = match request.body {
             Body::None => (None, None),
             Body::Bytes(bytes) => (Some(bytes), None),
@@ -280,39 +244,29 @@ impl<D: Dial, K: Clock + Clone + Unpin> leans3::Transport for Http<D, K> {
             headers: request.headers,
             bytes,
         };
-        let mut wait = Duration::from_secs(1);
-        for attempt in 1..=attempts {
-            let stream = upload.as_mut().map(|(source, len)| (source, *len));
-            let result = self.attempt(&parts, stream).await;
-            let last = attempt == attempts;
-            match result {
-                Ok(response) if !last && busy(response.status) => self.drain(response).await,
-                Ok(mut response) => {
-                    self.last_error = None;
-                    let _ = response.set_read_timeout(Some(self.limits.progress));
-                    return Ok(Reply {
-                        status: response.status,
-                        reason: core::mem::take(&mut response.reason),
-                        header: core::mem::take(&mut response.header),
-                        length: response.length,
-                        body: Some(Box::new(response)),
-                        returned: self.returned.clone(),
-                        clock: self.clock.clone(),
-                        progress: self.limits.progress,
-                        target,
-                        observer: self.observer.clone(),
-                    });
-                }
-                Err(error) if !last && broken(&error) => self.last_error = Some(error),
-                Err(error) => {
-                    self.last_error = Some(error);
-                    return Err(io(error));
-                }
+        let stream = upload.as_mut().map(|(source, len)| (source, *len));
+        match self.attempt(&parts, stream).await {
+            Ok(mut response) => {
+                self.last_error = None;
+                let _ = response.set_read_timeout(Some(self.limits.progress));
+                Ok(Reply {
+                    status: response.status,
+                    reason: core::mem::take(&mut response.reason),
+                    header: core::mem::take(&mut response.header),
+                    length: response.length,
+                    body: Some(Box::new(response)),
+                    returned: self.returned.clone(),
+                    clock: self.clock.clone(),
+                    progress: self.limits.progress,
+                    target,
+                    observer: self.observer.clone(),
+                })
             }
-            self.clock.sleep(wait).await;
-            wait = wait.saturating_mul(2);
+            Err(error) => {
+                self.last_error = Some(error);
+                Err(io(error))
+            }
         }
-        Err(IoError::Other("leans3http: no attempt"))
     }
 }
 

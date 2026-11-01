@@ -177,21 +177,22 @@ fn get_keeps_one_connection_and_reports_the_body() {
 }
 
 #[test]
-fn get_retries_busy_and_broken_with_growing_waits() {
-    // 503, dan een verbinding die niets zegt, dan het antwoord.
-    let net = net(vec![
-        vec![Turn::Answer(BUSY)],
-        vec![],
-        vec![Turn::Answer(OK)],
-    ]);
+fn get_is_one_attempt_and_a_busy_answer_goes_to_the_caller() {
+    // Een 503 komt terug als fout, zonder tweede dial en zonder wachten.
+    let net = net(vec![vec![Turn::Answer(BUSY)], vec![Turn::Answer(OK)]]);
     let clock = Still::default();
     let mut http = Http::new(net.clone(), clock.clone());
-    let (body, _) = block_on(client().get(&mut http, "data/a")).unwrap();
-    assert_eq!(body, b"hello");
-    // Per poging een termijn van 60 s, en daartussen 1 en 2 s wachten.
+    let err = block_on(client().get(&mut http, "data/a"));
+    assert!(matches!(err, Err(leans3::Error::Status(ref s)) if s.code == 503));
+    assert_eq!(net.dials.get(), 1);
     let waits = clock.0.borrow().clone();
-    let pauses: Vec<_> = waits.iter().filter(|d| d.as_secs() < 60).collect();
-    assert_eq!(pauses, [&Duration::from_secs(1), &Duration::from_secs(2)]);
+    assert!(waits.iter().all(|d| d.as_secs() >= 60), "{waits:?}");
+    // Een verbinding die niets zegt: één transportfout, geen herkansing.
+    let silent = self::net(vec![vec![]]);
+    let mut http = Http::new(silent.clone(), Still::default());
+    let err = block_on(client().get(&mut http, "data/a")).unwrap_err();
+    assert!(matches!(err, leans3::Error::Transport { .. }), "{err:?}");
+    assert_eq!(silent.dials.get(), 1);
 }
 
 #[test]
@@ -201,8 +202,7 @@ fn put_is_never_repeated_and_a_silent_server_times_out() {
     let err = block_on(client().put(&mut http, "k", b"x", &leans3::PutOptions::default()));
     assert!(matches!(err, Err(leans3::Error::Status(ref s)) if s.code == 503));
     assert_eq!(net.dials.get(), 1);
-    // Een server die zwijgt: de termijn van de poging beslist, niet de server.
-    http.limits.attempts = 1;
+    // Een server die zwijgt: de termijn van het verzoek beslist, niet de server.
     let err = block_on(client().get(&mut http, "k")).unwrap_err();
     assert!(matches!(err, leans3::Error::Transport { .. }), "{err:?}");
     assert_eq!(
