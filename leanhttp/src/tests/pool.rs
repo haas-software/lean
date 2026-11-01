@@ -164,7 +164,7 @@ fn keep_alive_max_idle() {
         r2.read_to_end(64).await.unwrap();
         cl.finish(r1, now()).await;
         cl.finish(r2, now()).await;
-        assert_eq!(cl.pool.idle_for("srv:80"), 1);
+        assert_eq!(cl.pool.idle_for("http://srv:80"), 1);
     });
 }
 
@@ -299,7 +299,7 @@ fn pool_ruimt_elke_host_op() {
             1,
             "een verlopen verbinding naar host A blijft staan"
         );
-        assert_eq!(cl.pool.idle_for("a:80"), 0);
+        assert_eq!(cl.pool.idle_for("http://a:80"), 0);
     });
 }
 
@@ -431,7 +431,7 @@ fn lege_body_poolt_direct() {
             .await
             .unwrap();
         cl.finish(resp, now()).await;
-        assert_eq!(cl.pool.idle_for("srv:80"), 1);
+        assert_eq!(cl.pool.idle_for("http://srv:80"), 1);
     });
 }
 
@@ -575,5 +575,19 @@ fn finish_now_poolt_alleen_een_hele_body() {
         assert_eq!(resp.read(&mut buf[..2]).await, Ok(2));
         cl.pool.finish_now(resp, now());
         assert_eq!(cl.pool.idle_count(), 0);
+    });
+}
+
+/// F3: de sleutel draagt het schema. Een kale verbinding naar
+/// `http://srv:443` mag nooit een `https://srv`-verzoek dragen.
+#[test]
+fn poolsleutel_draagt_het_schema() {
+    let n = net("srv:443", ok());
+    block_on(async {
+        let mut cl = Client::new(n.clone());
+        fetch_all(&mut cl, "http://srv:443/a").await;
+        assert_eq!(cl.pool.idle_for("http://srv:443"), 1);
+        assert_eq!(cl.pool.idle_for("https://srv:443"), 0);
+        assert!(cl.pool.take("https://srv:443", now()).await.is_none());
     });
 }

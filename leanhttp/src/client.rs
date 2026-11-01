@@ -540,8 +540,13 @@ async fn one_hop<D: Dial>(
     let keep_alive = pool.is_some();
     let head = build_request(call, &url, keep_alive).map_err(fail)?;
     let port = url.effective_port();
+    // De sleutel van de pool draagt het schema: `http://h:443` en `https://h`
+    // delen anders één kale verbinding, en een https-verzoek ging dan in
+    // platte tekst over een verbinding zonder ketentoets (F3).
     let mut addr = Vec::new();
-    write!(FmtBuf(&mut addr), "{}", url.authority).map_err(|_| fail(Error::Alloc { bytes: 0 }))?;
+    let scheme = if url.is_https() { "https" } else { "http" };
+    write!(FmtBuf(&mut addr), "{scheme}://{}", url.authority)
+        .map_err(|_| fail(Error::Alloc { bytes: 0 }))?;
     if url.port.is_none() {
         write!(FmtBuf(&mut addr), ":{port}").map_err(|_| fail(Error::Alloc { bytes: 0 }))?;
     }

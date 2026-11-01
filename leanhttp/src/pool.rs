@@ -181,7 +181,8 @@ impl<C: Conn> Pool<C> {
         self.idle.len()
     }
 
-    /// Aantal ruststaande verbindingen naar `addr`.
+    /// Aantal ruststaande verbindingen naar `addr`: `schema://host:poort`,
+    /// zoals `http://srv:80`; het schema hoort bij de sleutel.
     pub fn idle_for(&self, addr: &str) -> usize {
         self.idle.iter().filter(|ic| ic.addr == addr).count()
     }
