@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "ELF64 voor een loader: PT_LOAD-segmenten, de bytes op een laadadres, symbolen op naam."
+description = "ELF64 voor een loader: de header en de PT_LOAD-segmenten."
 
 [dependencies]
 
