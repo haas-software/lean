@@ -17,8 +17,13 @@ use crate::{Error, Result, SEC};
 pub(crate) const NEIGHBOR_ENTRY_TTL: u64 = 120 * SEC;
 /// Wachttijd tussen twee vragen.
 pub(crate) const NEIGHBOR_RETRY_IVAL: u64 = SEC;
-/// Vragen voordat een query opgeeft.
-pub(crate) const NEIGHBOR_QUERY_TRIES: u8 = 5;
+/// Vragen voordat een query opgeeft: drie, zoals Linux. Daar vraagt een
+/// onopgeloste buur `mcast_solicit` keer (3 in `arp_tbl` van
+/// net/ipv4/arp.c en `nd_tbl` van net/ipv6/ndisc.c, met
+/// `retrans_time` 1 s); `__neigh_event_send` in net/core/neighbour.c
+/// slaat de `ucast_solicit` dan over, want er is nog geen MAC om naar te
+/// vragen. Na 3 s zonder antwoord is de buur er niet.
+pub(crate) const NEIGHBOR_QUERY_TRIES: u8 = 3;
 /// Hoe lang een opgegeven query negatief gecachet blijft.
 pub(crate) const NEIGHBOR_FAIL_TTL: u64 = 5 * SEC;
 

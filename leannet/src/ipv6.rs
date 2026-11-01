@@ -30,7 +30,7 @@ pub struct Udp6Handle {
 /// De begrensde NDP-baan rapporteert degradatie zonder per-pakketlogs.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct NdpStats {
-    /// Queries die na vijf pogingen opgaven.
+    /// Queries die na drie pogingen opgaven.
     pub gave_up: usize,
     /// Passief leren geweigerd door capaciteit.
     pub learn_drop: usize,

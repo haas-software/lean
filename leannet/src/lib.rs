@@ -205,7 +205,7 @@ pub const SEC: u64 = 1_000_000_000;
 /// De tellers van de ARP-machine.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ArpStats {
-    /// Queries opgegeven na vijf pogingen.
+    /// Queries opgegeven na drie pogingen.
     pub gave_up: usize,
     /// Antwoorden die niet aan ons en niet gratuitous waren.
     pub ignored: usize,

@@ -238,8 +238,9 @@ De vraag naar een MAC:
    - **Waarom:** "Dial, UDP en de pomp delen deze beslissing" (`next_hop`).
 2. `resolve` zet een `Pending`-entry. `NeighborTable::poll` (vanuit
    `drain_arp`) stuurt een vraag, hoogstens één per seconde, en hoogstens
-   5 keer. Daarna volgt `Failed`, als negatieve cache van 5 s, en worden alle
-   route-wachters gewekt (`gave_up`).
+   3 keer, zoals Linux (`mcast_solicit`; tot 01-11-2026 was het 5, zonder
+   reden). Daarna volgt `Failed`, als negatieve cache van 5 s, en worden
+   alle route-wachters gewekt (`gave_up`).
 3. Een opgeloste entry geldt 120 s. Er is geen NUD. Een levende stroom
    houdt hem vers via `learn`, dat alleen `born` verzet en nooit een MAC
    wisselt.
@@ -388,7 +389,7 @@ hoogstens de halve tabel vullen. applib seedt zo 10.100.0.1.
       `abort_and_reap`.
       - **Waarom:** "Anders wapent `emit` nooit hertransmissie en houdt de
         verbinding haar budget voorgoed".
-      - Dit is hard falen op een vaste uitkomst (5 vragen van 1 s).
+      - Dit is hard falen op een vaste uitkomst (3 vragen van 1 s).
 3. Hoogstens 256 rondes van `next_wire_frame` en `feed_loopback`. Loopt dat
    op, dan `notify`: de pomp wekt zichzelf.
    - **Waarom:** "Loopback kan een direct antwoord maken; begrens de rondes
@@ -613,7 +614,7 @@ Elke fout ruimt op (`abort_and_reap`, `release_handle`).
      `emit` dan niet aan. Het einde van die toestand is een ARP-antwoord
      (`wake_route_waiters`, `notify`) of de opgave (`drain_arp` wekt alles).
      Beide wekken de pomp al. Tot dan wekt de pomp elke 200 ms voor niets
-     (hoogstens 5 s, de ARP-ladder).
+     (hoogstens 3 s, de ARP-ladder).
 
 ### 4.8 IPv6 (feature `ipv6`, kort)
 
@@ -1299,7 +1300,7 @@ onze uitgaande verbinding).
 | H3 | Fast retransmit bij 3 dup-ACKs | `process_ack` | **protocol** | RFC 5681 §3.2 |
 | H4 | Persist-probes met een eigen backoff | `on_timer` | **protocol** | RFC 9293 §3.8.6.1 |
 | H5 | Challenge-ACK op een RST of SYN in het venster | `recv` | **protocol** | RFC 5961 |
-| H6 | ARP-vraag 5 keer, 1 s ertussen, 5 s negatief | `neighbor.rs` | **protocol** (vorm) / **verdedigbaar** (aantal) | RFC 1122 §2.3.2.1 (≤ 1/s); Linux 3 |
+| H6 | ARP-vraag 3 keer (was 5, 01-11-2026), 1 s ertussen, 5 s negatief | `neighbor.rs` | **protocol** (vorm) / **verdedigbaar** (aantal) | RFC 1122 §2.3.2.1 (≤ 1/s); Linux 3 (`mcast_solicit`) |
 | H7 | `probe_neighbor` ≤ 1/s | `neighbor.rs` | **verdedigbaar** | NUD_PROBE, d19b413 |
 | H8 | IPv6 RS 3 keer, 4 s ertussen | `ipv6.rs` `emit` | **protocol** | RFC 4861 §6.3.7 |
 | H9 | DHCP DISCOVER-rondes van 3 s tot de deadline | `client.rs` | **protocol**, maar zonder de vorm (geen backoff, geen jitter) | RFC 2131 §4.1 (SHOULD) |

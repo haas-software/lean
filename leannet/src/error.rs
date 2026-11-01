@@ -21,7 +21,7 @@ pub enum Error {
     /// Geen bruikbare bron of route naar de IPv6-bestemming.
     #[cfg(feature = "ipv6")]
     NoRoute6,
-    /// De IPv6-buur gaf geen antwoord binnen vijf pogingen.
+    /// De IPv6-buur gaf geen antwoord binnen drie pogingen.
     #[cfg(feature = "ipv6")]
     Unreachable6,
 

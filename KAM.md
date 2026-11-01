@@ -245,7 +245,7 @@ silent wait. They are policy for these nodes, not general Internet defaults.
 | FIN-WAIT-2 after a half close | no limit | 60 s | Linux `tcp_fin_timeout`. |
 | Full close | — | 20 s absolute for data, FIN and TIME-WAIT together | An ownership bound: after the owner let go, a cooperative close is useful, holding the tuple and buffers forever is not. Traffic does not extend it. |
 | Accept handoff | — | 30 s absolute | Same: a completed handshake without an owner. |
-| ARP | at most one request per second (RFC 1122 §2.3.2.1) | 5 requests, 1 s apart, then 5 s negative | Open: no reason documented for 5 (Linux asks 3 times, `mcast_solicit`). The negative cache keeps a dead host from being asked in a loop. To decide: 3 like Linux, or 5 with its reason. |
+| ARP and NDP | at most one request per second (RFC 1122 §2.3.2.1) | 3 requests, 1 s apart, then 5 s negative | As Linux: an unresolved neighbour is asked `mcast_solicit` times (3 in `arp_tbl` and `nd_tbl`, `retrans_time` 1 s). The negative cache keeps a dead host from being asked in a loop. |
 
 ### ADAPT
 
