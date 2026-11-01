@@ -922,6 +922,33 @@ fn stack_self_dial_meerdere_rondes() {
 }
 
 #[test]
+fn abort_peer_breekt_alles_van_een_adres_af() {
+    let mut net = Net::pair(1 << 20, 1 << 20);
+    let (c1, s1, l) = connected(&mut net, 90);
+    let c2 = dial(&mut net, IP_B, 90, 5 * SEC).expect("tweede verbinding");
+    let s2 = accept(&mut net, sb, l);
+    let used = net.a.pot.used;
+    assert!(used > 0);
+    let (w, woke) = counting_waker();
+    net.a.tcp_register_read_waker(c1, &w).unwrap();
+    // Een ander adres raakt niets.
+    assert_eq!(net.a.abort_peer([10, 0, 0, 99]), 0);
+    assert_eq!(net.a.abort_peer(IP_B), 2);
+    assert!(woke.count() > 0, "de lezer werd niet gewekt");
+    assert_eq!(net.a.pot.used, 0, "het budget kwam niet terug");
+    let now = net.now;
+    assert_eq!(net.a.tcp_read(c1, &mut [0; 8], now), Err(Error::Reset));
+    assert_eq!(net.a.tcp_write(c2, b"x", now), Err(Error::Reset));
+    // De peer krijgt de RST's: beide kanten zijn weg.
+    net.run_for(50 * MS);
+    for s in [s1, s2] {
+        assert_eq!(net.b().tcp_read(s, &mut [0; 8], now), Err(Error::Reset));
+    }
+    // Daarna is het adres gewoon weer bereikbaar.
+    assert!(dial(&mut net, IP_B, 90, 5 * SEC).is_ok());
+}
+
+#[test]
 fn stack_peer_herstart_zelfde_vier_tupel() {
     let mut net = Net::pair(1 << 20, 1 << 20);
     let l = net.b().tcp_listen(90).unwrap();

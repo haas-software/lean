@@ -132,10 +132,6 @@ pub(crate) const TCP_FULL_CLOSE_DUR: u64 = 20 * SEC;
 /// FIN-WAIT-2 na een halve close: de RFC kent geen grens, Linux breekt na
 /// `tcp_fin_timeout` (60 s) af. Dat doen wij ook.
 pub(crate) const TCP_FIN_WAIT2_DUR: u64 = 60 * SEC;
-/// CLOSE-WAIT: de peer is klaar. Staartlezen en antwoorden blijven mogelijk,
-/// maar een vergeten verbinding wordt na twee minuten zonder echte
-/// applicatie-I/O of ACK-voortgang opgeruimd.
-pub(crate) const TCP_CLOSE_WAIT_DUR: u64 = 120 * SEC;
 /// De klassieke MSS zonder optie.
 pub(crate) const TCP_DEFAULT_MSS: usize = 536;
 /// De MSS-klem zonder geadverteerde MSS: MTU 1500 min IP- en TCP-header.
@@ -265,8 +261,8 @@ pub(crate) struct TcpConn {
     /// weggegooid, zodat ACK en FIN verder kunnen nadat de ontvangstring
     /// terug is.
     pub(crate) app_closed: bool,
-    /// Vernieuwbaar zolang een applicatie een CLOSE-WAIT-socket bezit; een
-    /// volledige close overschrijft hem met één absolute grens. Nul is "geen".
+    /// De absolute grens van een volledige close (`TCP_FULL_CLOSE_DUR`).
+    /// Nul is "geen".
     pub(crate) close_deadline: u64,
     /// De wachtende reset; `emit` stuurt hem eerst en reap bewaart hem als de
     /// verbinding sterft voordat de pomp langskwam.
@@ -411,23 +407,13 @@ impl TcpConn {
         }
     }
 
-    /// Houdt een legitiem actieve half-gesloten verbinding in leven en begrenst
-    /// een vergetene. Een volledige close heeft een eigen absolute deadline.
-    pub(crate) fn touch_close_wait(&mut self, now: u64) {
-        if self.state == TcpState::CloseWait && !self.app_closed {
-            self.close_deadline = now + TCP_CLOSE_WAIT_DUR;
-        }
-    }
-
     /// Staat los van `emit`, zodat de stack een eigenaarloze verbinding kan
     /// opruimen ook als de buurresolutie geen route voor zijn RST heeft.
     pub(crate) fn lifecycle_expired(&self, now: u64) -> bool {
         if self.state == TcpState::Closed {
             return false;
         }
-        (self.app_closed || self.state == TcpState::CloseWait)
-            && self.close_deadline != 0
-            && now >= self.close_deadline
+        self.app_closed && self.close_deadline != 0 && now >= self.close_deadline
     }
 
     /// Beëindigt de verbinding en zet één reset klaar.
@@ -911,7 +897,6 @@ impl TcpConn {
         self.dupacks = 0;
         self.retries = 0; // Echte voortgang bewijst leven.
         self.persist_backoff = 0;
-        self.touch_close_wait(now); // Voortgang is activiteit; duplicaten niet.
 
         // Karn: alleen niet-hertransmitteerde ruimte mag bemeten worden.
         if self.timing && seq_leq(self.timed_seq, ack) {
@@ -1016,10 +1001,10 @@ impl TcpConn {
             self.fin_rcvd = true;
             self.need_ack = true;
             match self.state {
-                TcpState::Established => {
-                    self.state = TcpState::CloseWait;
-                    self.close_deadline = now + TCP_CLOSE_WAIT_DUR;
-                }
+                // CLOSE-WAIT duurt tot de eigenaar sluit, zoals de RFC: geen
+                // eigen grens. Een vergeten handvat is een fout van de
+                // eigenaar, en `Stack::abort_peer` ruimt een peer op.
+                TcpState::Established => self.state = TcpState::CloseWait,
                 // Onze FIN is nog onbevestigd: gelijktijdig sluiten.
                 TcpState::FinWait1 => self.state = TcpState::Closing,
                 TcpState::FinWait2 => {
@@ -1415,8 +1400,7 @@ impl TcpConn {
         if matches!(self.state, TcpState::TimeWait | TcpState::FinWait2) {
             add(self.tw_deadline);
         }
-        if (self.state == TcpState::CloseWait || self.app_closed) && self.state != TcpState::Closed
-        {
+        if self.app_closed && self.state != TcpState::Closed {
             add(self.close_deadline);
         }
         d

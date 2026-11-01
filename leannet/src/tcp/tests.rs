@@ -891,81 +891,29 @@ fn tcp_full_close_deadline_kan_niet_worden_vernieuwd() {
 }
 
 #[test]
-fn tcp_close_wait_ruimt_alleen_inactiviteit_op() {
-    let mut w = new_pair(8 << 10, 8 << 10);
-    w.connect();
-    w.b.close().unwrap();
-    w.pump();
-    assert!(
-        w.a.state == TcpState::CloseWait && w.a.close_deadline != 0,
-        "peer-FIN gaf state={} deadline={}",
-        w.a.state,
-        w.a.close_deadline
-    );
-    // Activiteit vernieuwt de idle-termijn; louter tijd en duplicate ACKs niet.
-    let first = w.a.close_deadline;
-    w.advance(MIN);
-    w.a.touch_close_wait(w.now);
-    assert!(
-        w.a.close_deadline > first,
-        "app-activiteit vernieuwde de CLOSE-WAIT-termijn niet"
-    );
-    let refreshed = w.a.close_deadline;
-    let seg = s(w.a.rcv_nxt, w.a.una, ACK, w.a.snd_wnd as u16);
-    w.recv_a(&seg, &[]);
-    assert_eq!(
-        w.a.close_deadline, refreshed,
-        "duplicate ACK vernieuwde de CLOSE-WAIT-termijn"
-    );
-
-    w.now = refreshed + 1;
-    let segs = w.drain_a();
-    assert!(
-        w.a.state == TcpState::Closed && w.a.reset,
-        "vergeten CLOSE-WAIT werd niet gereapt"
-    );
-    assert!(
-        segs.iter().any(|p| has(p, RST)),
-        "CLOSE-WAIT-timeout gaf op zonder RST"
-    );
-
-    let mut idle = new_pair(8 << 10, 8 << 10);
-    idle.connect();
-    idle.advance(10 * TCP_CLOSE_WAIT_DUR);
-    idle.drain_a();
-    assert!(
-        idle.a.state == TcpState::Established && idle.a.next_deadline().is_none(),
-        "legitiem idle ESTABLISHED werd geraakt: state={} deadline={:?}",
-        idle.a.state,
-        idle.a.next_deadline()
-    );
-}
-
-#[test]
-fn tcp_full_close_vervangt_bijna_verlopen_close_wait_deadline() {
+fn tcp_close_wait_duurt_tot_de_eigenaar_sluit() {
+    // CLOSE-WAIT heeft geen eigen grens meer (besluit L4): de verbinding
+    // blijft, zonder timer, tot de eigenaar sluit of `abort_peer` haar opruimt.
     let mut w = new_pair(8 << 10, 8 << 10);
     w.connect();
     w.b.close().unwrap();
     w.pump();
     assert_eq!(w.a.state, TcpState::CloseWait);
-    w.now = w.a.close_deadline - 5 * SEC;
-    let old = w.a.close_deadline;
+    w.advance(3600 * SEC);
+    w.drain_a();
+    assert!(
+        w.a.state == TcpState::CloseWait && w.a.next_deadline().is_none(),
+        "CLOSE-WAIT liep af: state={} deadline={:?}",
+        w.a.state,
+        w.a.next_deadline()
+    );
+    // Een volledige close na lange tijd krijgt nog steeds zijn absolute grens.
     w.a.close().unwrap();
     w.a.abandon_read(w.now, &mut w.pot_a);
     let want = w.now + TCP_FULL_CLOSE_DUR;
-    assert!(
-        w.a.close_deadline == want && w.a.close_deadline > old,
-        "full Close deadline={}, want verse absolute deadline {want} (oude={old})",
-        w.a.close_deadline
-    );
-    assert!(
-        !w.a.lifecycle_expired(old + 1),
-        "oude CLOSE-WAIT-deadline verkortte de full-Close-grace"
-    );
-    assert!(
-        w.a.lifecycle_expired(want),
-        "verse full-Close-deadline werd niet absoluut afgedwongen"
-    );
+    assert_eq!(w.a.close_deadline, want);
+    assert!(!w.a.lifecycle_expired(want - 1));
+    assert!(w.a.lifecycle_expired(want));
 }
 
 #[test]

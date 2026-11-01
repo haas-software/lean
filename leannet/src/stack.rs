@@ -477,6 +477,32 @@ impl Stack {
         g
     }
 
+    /// Breekt elke verbinding met `ip` af: elke levende verbinding (ook een
+    /// embryo of een dial) krijgt een RST, haar wachters worden gewekt en
+    /// haar buffers gaan terug naar het budget. Een handvat geeft daarna
+    /// [`Error::Reset`] (een dial [`Error::Closed`]). Geeft het aantal.
+    ///
+    /// Voor de eigenaar die een peer laat gaan, zoals HopOS bij de stop van
+    /// een slot (besluit L7, 01-11-2026): de verbindingen wachten dan niet op
+    /// een levensgrens. Linux doet hetzelfde met `ss -K dst <ip>`
+    /// (`SOCK_DESTROY`). Kan de rij een RST niet meer dragen, dan telt
+    /// `drop_reply_full` hem; de peer hoort het dan bij zijn volgende segment.
+    pub fn abort_peer(&mut self, ip: [u8; 4]) -> usize {
+        let mut n = 0;
+        for i in 0..self.conns.len() {
+            let hit = self
+                .conns
+                .get(i)
+                .and_then(Option::as_ref)
+                .is_some_and(|c| c.live && c.key.rip == ip);
+            if hit {
+                self.abort_and_reap(i);
+                n += 1;
+            }
+        }
+        n
+    }
+
     /// Sluit de stack: breekt verbindingen af en ruimt ze op, sluit
     /// listeners en geeft UDP-poorten vrij. Elk handvat geeft daarna
     /// [`Error::Closed`]; wachters worden gewekt.

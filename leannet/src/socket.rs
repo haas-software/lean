@@ -117,10 +117,11 @@ impl Stack {
     /// Neemt een voltooide handshake aan. [`Error::WouldBlock`] als de backlog
     /// leeg is; registreer dan [`Stack::listen_register_waker`].
     ///
-    /// Een peer kan resetten, of een CLOSE-WAIT-timer kan de verbinding
+    /// Een peer kan resetten, of [`Stack::abort_peer`] de verbinding
     /// opruimen terwijl ze in de rij staat; zo'n verouderde entry komt nooit
-    /// bij de applicatie.
-    pub fn tcp_accept(&mut self, h: ListenHandle, now: u64) -> Result<TcpHandle> {
+    /// bij de applicatie. `_now` houdt de vorm van de andere calls; sinds de
+    /// CLOSE-WAIT-grens weg is (01-11-2026), kent accept geen klok.
+    pub fn tcp_accept(&mut self, h: ListenHandle, _now: u64) -> Result<TcpHandle> {
         loop {
             let c = self.listener_mut(h).ok_or(Error::Closed)?.pop();
             let Some(c) = c else {
@@ -133,7 +134,6 @@ impl Stack {
                 conn.handoff_deadline = 0;
                 conn.listener = None;
                 conn.app_owned = true;
-                conn.tcp.touch_close_wait(now);
             }
             // Herbereken de protocoltimer nu de overdrachtsgrens weg is.
             self.notify();
@@ -256,7 +256,6 @@ impl Stack {
         } else if matches!(state, TcpState::Established | TcpState::CloseWait) {
             // Een peer kan data en FIN sturen voordat deze wachter wakker wordt,
             // en zo door ESTABLISHED naar een nog bruikbare CLOSE-WAIT gaan.
-            c.tcp.touch_close_wait(now);
             c.dial = None;
             return Ok(());
         } else if dial.via_arp && self.arp.no_answer(dial.hop, now) {
@@ -307,8 +306,9 @@ impl Stack {
     ///
     /// `Ok(0)` bij een lege `buf`, of bij EOF na de FIN van de peer.
     /// [`Error::WouldBlock`] als er nog niets is; registreer dan
-    /// [`Stack::tcp_register_read_waker`].
-    pub fn tcp_read(&mut self, h: TcpHandle, buf: &mut [u8], now: u64) -> Result<usize> {
+    /// [`Stack::tcp_register_read_waker`]. `_now` houdt de vorm, zoals bij
+    /// [`Stack::tcp_accept`].
+    pub fn tcp_read(&mut self, h: TcpHandle, buf: &mut [u8], _now: u64) -> Result<usize> {
         let c = self.sock(h)?;
         if buf.is_empty() {
             // `net.Conn` eist dat een lege read meteen terugkeert.
@@ -317,7 +317,6 @@ impl Stack {
         match c.tcp.read(buf) {
             Ok(0) => Err(Error::WouldBlock),
             Ok(n) => {
-                c.tcp.touch_close_wait(now);
                 self.notify(); // Lezen kan het ontvangstvenster hebben geopend.
                 Ok(n)
             }
@@ -346,7 +345,8 @@ impl Stack {
     ///
     /// [`Error::WouldBlock`] als de zendring vol is en niet kan groeien;
     /// registreer dan [`Stack::tcp_register_write_waker`] en wacht op ACK-ruimte.
-    pub fn tcp_write(&mut self, h: TcpHandle, data: &[u8], now: u64) -> Result<usize> {
+    /// `_now` houdt de vorm, zoals bij [`Stack::tcp_accept`].
+    pub fn tcp_write(&mut self, h: TcpHandle, data: &[u8], _now: u64) -> Result<usize> {
         let pot = &mut self.pot;
         let c = self
             .conns
@@ -356,7 +356,6 @@ impl Stack {
             .ok_or(Error::Closed)?;
         let n = c.tcp.write(data, pot)?;
         if n > 0 {
-            c.tcp.touch_close_wait(now);
             self.notify(); // Laat de pomp versturen.
             return Ok(n);
         }
