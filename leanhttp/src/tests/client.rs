@@ -1200,7 +1200,11 @@ fn uitgaande_headerwaarde_strikt() {
         &srv,
         "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
     );
-    assert!(got.contains("200") && !got.contains("X-A"), "{got}");
+    // De handler hoort de fout vóór er iets op de draad staat (F10).
+    assert!(
+        got.starts_with("HTTP/1.1 500") && !got.contains("X-A"),
+        "{got}"
+    );
 }
 
 #[test]

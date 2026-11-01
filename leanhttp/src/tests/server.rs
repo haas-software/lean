@@ -390,7 +390,9 @@ fn serve_geen_response_splitting() {
         !got.contains("X-Gesmokkeld"),
         "gesmokkelde header kwam door: {got}"
     );
-    assert!(got.starts_with("HTTP/1.1 200"), "{got}");
+    // Niet stil weglaten: de handler kreeg IllegalHeaderValue, en de client
+    // een 500 in plaats van een antwoord zonder die header (F10).
+    assert!(got.starts_with("HTTP/1.1 500"), "{got}");
 }
 
 #[test]
@@ -1216,6 +1218,38 @@ fn drain_voor_nette_close() {
             Ok(0),
             "verwachtte de close na de drain"
         );
+    });
+}
+
+/// F9: na een handlerfout veegt de server de ongelezen body weg vóór hij
+/// sluit, net als na een gewoon antwoord; anders kan de 500 in een RST
+/// verdwijnen.
+#[test]
+fn drain_na_een_handlerfout() {
+    block_on(async {
+        let (mut c, s) = pipe();
+        let fails: Handler = h!(_ex => {
+            return Err(Error::BadUrl);
+        });
+        fails(s);
+        write_all(
+            &mut c,
+            b"POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 4\r\n\r\nha",
+        )
+        .await
+        .unwrap();
+        let mut got = String::new();
+        let mut buf = [0u8; 512];
+        while !got.ends_with("internal server error\n") {
+            let n = read(&mut c, &mut buf).await.unwrap();
+            assert!(n > 0, "antwoord afgebroken na {got:?}");
+            got.push_str(std::str::from_utf8(&buf[..n]).unwrap());
+        }
+        assert!(got.starts_with("HTTP/1.1 500"), "{got}");
+        write_all(&mut c, b"lf")
+            .await
+            .expect("de server sloot zonder de body te drainen");
+        assert_eq!(read(&mut c, &mut buf).await, Ok(0));
     });
 }
 

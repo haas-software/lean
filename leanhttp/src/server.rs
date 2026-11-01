@@ -327,7 +327,13 @@ where
             Ok(()) => match ex.settle().await {
                 Ok(true) => continue,
                 Ok(false) => break Ok(()),
-                Err(e) => break Err(e),
+                // Faalde de kop pas bij het afronden (een gebufferd antwoord
+                // met een ongeldige header), dan staat er nog niets op de
+                // draad en krijgt de client alsnog een 500.
+                Err(e) => {
+                    ex.fail().await;
+                    break Err(e);
+                }
             },
             Err(e) => {
                 ex.fail().await;
@@ -983,6 +989,18 @@ impl<'c, C: Conn> Exchange<'c, C> {
 
     /// Zet de statusregel en de headers in de schrijfbuffer.
     async fn write_head(&mut self) -> Result {
+        // Een ongeldige naam of een waarde met controlebytes zou een tweede
+        // antwoord kunnen injecteren. De handler hoort het, vóór er iets op de
+        // draad staat: dan kan hij nog een 500 krijgen (F10). Stil weglaten gaf
+        // een redirect zonder Location.
+        for (k, v) in self.resp.hdr.iter() {
+            if !valid_token(k) {
+                return Err(Error::IllegalHeaderName);
+            }
+            if !valid_field_value(v.as_bytes()) {
+                return Err(Error::IllegalHeaderValue);
+            }
+        }
         let watched = self.wire.watched;
         let r = &mut self.resp;
         r.started = true;
@@ -1045,11 +1063,6 @@ impl<'c, C: Conn> Exchange<'c, C> {
         )
         .map_err(|_| Error::Alloc { bytes: 0 })?;
         for (k, v) in r.hdr.iter() {
-            // Een ongeldige naam of een waarde met controlebytes zou een
-            // tweede antwoord kunnen injecteren: overslaan.
-            if !valid_token(k) || !valid_field_value(v.as_bytes()) {
-                continue;
-            }
             for part in [k, ": ", v, "\r\n"] {
                 try_extend(&mut head, part.as_bytes())?;
             }
@@ -1178,6 +1191,12 @@ impl<'c, C: Conn> Exchange<'c, C> {
         self.resp = Resp::new(false, head);
         let _ = self.error(500, "internal server error").await;
         let _ = self.finish().await;
+        // Veeg een ongelezen body kort weg, zoals `settle` doet: sluiten met
+        // ongelezen TCP-data kan resetten en de 500 uit de zendrij gooien (F9).
+        if !self.wire.watched && self.body.pending() {
+            self.wire.set_read_timeout(Some(DRAIN_TIMEOUT));
+            let _ = self.discard_body().await;
+        }
     }
 }
 
