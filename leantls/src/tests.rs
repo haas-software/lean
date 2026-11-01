@@ -1133,11 +1133,12 @@ fn key_update_rotates_keys_and_answers() {
 
 #[test]
 fn post_handshake_noise_is_ignored() {
-    // Een klaartekst-CCS, een NewSessionTicket en daarna data: alleen de data
-    // komt boven, en close_notify is een net einde.
+    // Een NewSessionTicket, over twee records gesplitst (RFC 8446 §5.1), en
+    // daarna data: alleen de data komt boven, en close_notify is een net
+    // einde.
     let mut peer = Peer::new();
-    let mut wire = vec![REC_CCS, 3, 3, 0, 1, 1];
-    wire.extend(peer.record(REC_HANDSHAKE, &[4, 0, 0, 3, 9, 9, 9]));
+    let mut wire = peer.record(REC_HANDSHAKE, &[4, 0, 0, 3, 9]);
+    wire.extend(peer.record(REC_HANDSHAKE, &[9, 9]));
     wire.extend(peer.record(REC_APP_DATA, b"data"));
     wire.extend(peer.record(REC_ALERT, &[1, 0]));
     let (raw, state) = mock();
@@ -1146,6 +1147,45 @@ fn post_handshake_noise_is_ignored() {
     let (got, err) = read_all(&mut c);
     assert!(err.is_none(), "{err:?}");
     assert_eq!(got, b"data");
+}
+
+/// F15: na de handshake is RFC 8446 streng. Een change_cipher_spec is een
+/// onverwacht record (§5); een half handshakebericht mag niet door data
+/// onderbroken worden, en een KeyUpdate moet zijn record afsluiten (§5.1).
+#[test]
+fn post_handshake_is_strict() {
+    let cases: [(&str, Vec<u8>, Error); 3] = [
+        (
+            "CCS na de Finished",
+            vec![REC_CCS, 3, 3, 0, 1, 1],
+            Error::UnexpectedRecord(REC_CCS),
+        ),
+        (
+            "data midden in een ticket",
+            {
+                let mut peer = Peer::new();
+                let mut w = peer.record(REC_HANDSHAKE, &[4, 0, 0, 3, 9]);
+                w.extend(peer.record(REC_APP_DATA, b"x"));
+                w
+            },
+            Error::UnexpectedRecord(REC_APP_DATA),
+        ),
+        (
+            "KeyUpdate niet aan het eind van zijn record",
+            Peer::new().record(REC_HANDSHAKE, &[24, 0, 0, 1, 0, 4, 0, 0, 0]),
+            Error::UnexpectedMessage { want: 0, got: 4 },
+        ),
+    ];
+    for (name, wire, want) in cases {
+        let (raw, state) = mock();
+        state.borrow_mut().input = wire;
+        let mut c = encrypted_conn_for_close_test(raw);
+        let (_, err) = read_all(&mut c);
+        assert!(
+            matches!(err, Some(ConnError::Tls(ref e)) if *e == want),
+            "{name}: {err:?}"
+        );
+    }
 }
 
 #[test]

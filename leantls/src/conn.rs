@@ -15,13 +15,13 @@ use core::task::{Context, Poll, ready};
 
 use crate::crypto::sha256::Sha256;
 use crate::error::{ConnError, Error, Result};
+use crate::handshake::MAX_HANDSHAKE;
 use crate::io::{AsyncRead, AsyncWrite};
 use crate::record::{
-    self, HEADER, MAX_CIPHER, MAX_PLAIN, REC_ALERT, REC_APP_DATA, REC_CCS, REC_HANDSHAKE, WRITE_BUF,
+    self, HEADER, MAX_CIPHER, MAX_PLAIN, REC_ALERT, REC_APP_DATA, REC_HANDSHAKE, WRITE_BUF,
 };
 use crate::schedule::Direction;
 use crate::trust::PeerKey;
-use crate::wire::Reader;
 
 /// Handshake-berichttype NewSessionTicket.
 pub(crate) const HS_NEW_SESSION_TICKET: u8 = 4;
@@ -194,14 +194,19 @@ where
                 return Poll::Ready(Ok(0));
             }
             let (typ, s, e) = ready!(self.poll_record(cx))?;
+            // Een half handshakebericht mag niet door een ander recordtype
+            // onderbroken worden (RFC 8446 §5.1).
+            if typ != REC_HANDSHAKE && !self.hs.is_empty() {
+                return Poll::Ready(Err(self.fail_read(Error::UnexpectedRecord(typ))));
+            }
             match typ {
                 REC_APP_DATA => self.plain = (s, e),
                 REC_ALERT => match record::alert_error(&self.rbuf[s..e]) {
                     None => self.peer_closed = true,
                     Some(err) => return Poll::Ready(Err(self.fail_read(err))),
                 },
-                // Het compatibiliteits-CCS mag ook na de handshake komen.
-                REC_CCS => {}
+                // Na de Finished van de peer is een change_cipher_spec een
+                // onverwacht record (RFC 8446 §5; F15).
                 REC_HANDSHAKE => {
                     if let Err(err) = self.post_handshake(s, e) {
                         return Poll::Ready(Err(self.fail_read(err)));
@@ -218,35 +223,50 @@ where
         e.into()
     }
 
-    /// Verwerkt berichten die een server na de handshake mag sturen.
+    /// Verwerkt berichten die een server na de handshake mag sturen. Een
+    /// bericht mag over records lopen (RFC 8446 §5.1): wat nog niet compleet
+    /// is, wacht in `hs` op het volgende record. Een KeyUpdate moet zijn
+    /// record afsluiten, want na hem gelden andere sleutels (F15).
     fn post_handshake(&mut self, start: usize, end: usize) -> Result {
-        let mut pos = start;
-        while pos < end {
-            let mut r = Reader::new(&self.rbuf[pos..end]);
-            let typ = r.u8()?;
-            let mut body = r.vec24()?;
-            let consumed = (end - pos) - r.rest().len();
-            // TLS 1.2 kent na de handshake alleen nog renegotiatie (een
-            // HelloRequest) of berichten die wij nooit vroegen; geen van
-            // beide doen we (RFC 5746 maakt renegotiatie niet veiliger dan
-            // geen renegotiatie).
-            #[cfg(feature = "tls12")]
-            if self.is_tls12() {
-                return Err(match typ {
-                    HS_HELLO_REQUEST => Error::Renegotiation,
-                    other => Error::PostHandshake(other),
-                });
-            }
+        // TLS 1.2 kent na de handshake alleen nog renegotiatie (een
+        // HelloRequest) of berichten die wij nooit vroegen; geen van beide
+        // doen we (RFC 5746 maakt renegotiatie niet veiliger dan geen
+        // renegotiatie).
+        #[cfg(feature = "tls12")]
+        if self.is_tls12() {
+            return Err(match self.rbuf.get(start).copied().unwrap_or(0) {
+                HS_HELLO_REQUEST => Error::Renegotiation,
+                other => Error::PostHandshake(other),
+            });
+        }
+        let part = self.rbuf.get(start..end).unwrap_or(&[]);
+        if self.hs.len() + part.len() > MAX_HANDSHAKE {
+            return Err(Error::HandshakeTooLarge(MAX_HANDSHAKE));
+        }
+        self.hs.try_reserve(part.len()).map_err(|_| Error::Alloc)?;
+        self.hs.extend_from_slice(part);
+        loop {
+            let [typ, a, b, c, ..] = self.hs[..] else {
+                return Ok(());
+            };
+            let n = usize::from(a) << 16 | usize::from(b) << 8 | usize::from(c);
+            let Some(body) = self.hs.get(4..4 + n) else {
+                return Ok(());
+            };
+            let request = body.first().copied();
+            let one_byte = body.len() == 1;
+            self.hs.drain(..4 + n);
             match typ {
                 // Hervatting bestaat hier niet, maar tickets sturen mag.
                 HS_NEW_SESSION_TICKET if !self.server => {}
                 HS_KEY_UPDATE => {
                     // RFC 8446 §4.6.3: vernieuw de leessleutels en antwoord
                     // als daarom gevraagd wordt.
-                    let request = body.u8()?;
-                    if request > 1 || !body.is_empty() {
+                    let request = request.unwrap_or(u8::MAX);
+                    if request > 1 || !one_byte {
                         return Err(Error::KeyUpdateValue(request));
                     }
+                    self.require_boundary()?;
                     let next = self
                         .read
                         .as_ref()
@@ -260,9 +280,7 @@ where
                 }
                 other => return Err(Error::PostHandshake(other)),
             }
-            pos += consumed;
         }
-        Ok(())
     }
 
     /// Zet een KeyUpdate zonder verzoek in de buffer en wisselt daarna de
