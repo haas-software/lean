@@ -24,7 +24,7 @@
 use crate::ct::wipe;
 
 /// Vier blokken: de breedte van één fixsliced aanroep.
-pub type Blocks = [[u8; 16]; 4];
+pub(crate) type Blocks = [[u8; 16]; 4];
 
 /// De rondesleutels in de fixsliced representatie.
 type Keys = [u64; 88];
@@ -33,13 +33,13 @@ type Keys = [u64; 88];
 type State = [u64; 8];
 
 /// AES-128 met uitgerolde, fixsliced rondesleutels.
-pub struct Aes128 {
+pub(crate) struct Aes128 {
     rkeys: Keys,
 }
 
 impl Aes128 {
     /// Zet de sleutel uit.
-    pub fn new(key: &[u8; 16]) -> Self {
+    pub(crate) fn new(key: &[u8; 16]) -> Self {
         Self {
             rkeys: aes128_key_schedule(key),
         }
@@ -47,13 +47,13 @@ impl Aes128 {
 
     /// Versleutelt één blok (kost evenveel als vier; gebruik
     /// [`Aes128::encrypt4`] waar dat kan).
-    pub fn encrypt(&self, block: &mut [u8; 16]) {
+    pub(crate) fn encrypt(&self, block: &mut [u8; 16]) {
         let out = aes128_encrypt(&self.rkeys, &[*block, [0; 16], [0; 16], [0; 16]]);
         *block = out[0];
     }
 
     /// Versleutelt vier blokken tegelijk.
-    pub fn encrypt4(&self, blocks: &mut Blocks) {
+    pub(crate) fn encrypt4(&self, blocks: &mut Blocks) {
         *blocks = aes128_encrypt(&self.rkeys, blocks);
     }
 }

@@ -8,7 +8,7 @@
 //! - [`sha1`]: alleen voor protocollen die hem eisen (WebSocket);
 //! - [`hmac`]: HMAC-SHA256 en HKDF (RFC 5869);
 //! - [`hash`]: één digest over SHA-256, -384 en -512 gekozen tijdens het lopen;
-//! - [`aes`] en [`gcm`]: AES-128 zonder opzoektabel en AES-128-GCM;
+//! - [`gcm`]: AES-128-GCM, over een AES-128 zonder opzoektabel (intern);
 //! - [`ct`]: constant-time vergelijken en het wissen van geheimen.
 //!
 //! # Constant-time
@@ -30,7 +30,7 @@
 // `ct`, daar toegestaan met een `expect` en een SAFETY-regel.
 #![deny(unsafe_code)]
 
-pub mod aes;
+mod aes;
 pub mod ct;
 pub mod gcm;
 pub mod hash;
