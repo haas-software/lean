@@ -91,7 +91,7 @@ pub trait AsyncWrite {
     /// Zet (of wist met `None`) een schrijftermijn die nu ingaat, met dezelfde
     /// betekenis als [`AsyncRead::set_read_timeout`].
     ///
-    /// De server zet [`WRITE_TIMEOUT`](crate::WRITE_TIMEOUT) per socketwrite,
+    /// De server zet een termijn van 30 s (`WRITE_TIMEOUT`) per socketwrite,
     /// zodat een client die niet leest geen taak gijzelt.
     fn set_write_timeout(
         &mut self,

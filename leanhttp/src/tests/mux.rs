@@ -161,7 +161,7 @@ fn mux_over_de_draad() {
     m.handle("GET /api/devices/{id}", ()).unwrap();
     let m = Rc::new(m);
     let srv = h!(ex => {
-        if m.dispatch(ex).await?.is_some() {
+        if dispatch(&m, ex).await?.is_some() {
             let body = format!("device {}", ex.req.path_value("id").unwrap_or(""));
             ex.write(body.as_bytes()).await?;
         }

@@ -85,11 +85,6 @@ impl<R: Reactor> TcpConn<R> {
         self.limit = at;
     }
 
-    /// De socket, zolang de verbinding open is.
-    pub fn socket(&self) -> Option<&TcpStream> {
-        self.socket.as_ref()
-    }
-
     /// De termijn van de volgende lees of schrijf, of `TimedOut` als een
     /// deadline voorbij is.
     fn left(&self, at: Option<Instant>) -> core::result::Result<Option<Duration>, IoError> {

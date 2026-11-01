@@ -7,8 +7,8 @@
 //! sluiten.
 //!
 //! De pool heeft geen klok en geen timer. De aanroeper geeft `now` mee (een
-//! monotone tijd sinds boot) en roept [`Pool::sweep`] vanuit zijn eigen timer
-//! aan; `take` veegt zelf ook, vóór het dialen. Er is geen permanente leeslus
+//! monotone tijd sinds boot); elk verzoek veegt eerst alle hosts, vóór het
+//! dialen. Er is geen permanente leeslus
 //! per ruststaande verbinding: het contract neemt een protocol-correcte origin
 //! aan die in rust geen bytes stuurt (KAM).
 
@@ -16,7 +16,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::time::Duration;
 
-use crate::client::{Call, Dial, Response, check_get, follow};
+use crate::client::{Call, Dial, Response, follow};
 use crate::error::Result;
 use crate::header::try_string;
 use crate::io::{Conn, close};
@@ -59,7 +59,7 @@ impl<C: Conn> Default for Pool<C> {
 
 impl<C: Conn> Pool<C> {
     /// Een lege pool met de standaardgrenzen: 2 per host, 8 totaal, 30 s.
-    pub const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Pool {
             idle: Vec::new(),
             max_idle_per_host: DEFAULT_MAX_IDLE_PER_HOST,
@@ -72,7 +72,7 @@ impl<C: Conn> Pool<C> {
     ///
     /// Vegen vóór het dialen: verlopen verbindingen kunnen het netwerkbudget
     /// opmaken en de dial laten falen, en dan komt een veeg erna nooit.
-    pub async fn take(&mut self, addr: &str, now: Duration) -> Option<C> {
+    pub(crate) async fn take(&mut self, addr: &str, now: Duration) -> Option<C> {
         self.sweep(now).await;
         let i = self.idle.iter().rposition(|ic| ic.addr == addr)?;
         Some(self.idle.remove(i).conn)
@@ -84,7 +84,7 @@ impl<C: Conn> Pool<C> {
     /// Geweigerd wordt: een gegroeide verbinding (zie
     /// [`Close::has_grown`](crate::Close::has_grown)), een verbinding die zijn
     /// termijnen niet kan wissen, en alles boven de grenzen.
-    pub async fn put(&mut self, addr: &str, conn: C, now: Duration) -> bool {
+    pub(crate) async fn put(&mut self, addr: &str, conn: C, now: Duration) -> bool {
         match self.admit(addr, conn, now) {
             Ok(()) => true,
             Err(mut conn) => {
@@ -94,8 +94,10 @@ impl<C: Conn> Pool<C> {
         }
     }
 
-    /// Als [`Pool::put`] zonder te wachten: een verbinding die niet past,
-    /// valt zonder nette afsluiting. Voor wie geen async heeft op het moment
+    /// Neemt een volledig gelezen verbinding aan zonder te wachten; `false`
+    /// betekent dat hij geweigerd is (gegroeid, termijnen niet te wissen, of
+    /// boven de grenzen). Een verbinding die niet past, valt zonder nette
+    /// afsluiting. Voor wie geen async heeft op het moment
     /// dat een body ophoudt, zoals een `AsyncRead` die een antwoord stroomt.
     pub fn put_now(&mut self, addr: &str, conn: C, now: Duration) -> bool {
         self.admit(addr, conn, now).is_ok()
@@ -128,7 +130,7 @@ impl<C: Conn> Pool<C> {
     /// meer gebeld werden. Op leannet, waar een open verbinding zijn buffers
     /// houdt, putte dat eens het budget van een LicheeRV-node uit na image-
     /// downloads, en kon de watchdog zijn hartslagverbinding niet meer openen.
-    pub async fn sweep(&mut self, now: Duration) {
+    pub(crate) async fn sweep(&mut self, now: Duration) {
         let timeout = self.idle_timeout;
         let mut i = 0;
         while i < self.idle.len() {
@@ -145,16 +147,9 @@ impl<C: Conn> Pool<C> {
         }
     }
 
-    /// Sluit alle ruststaande verbindingen.
-    pub async fn close_idle(&mut self) {
-        for mut ic in core::mem::take(&mut self.idle) {
-            let _ = close(&mut ic.conn).await;
-        }
-    }
-
     /// Geeft de verbinding van een antwoord terug aan de pool als hij
     /// herbruikbaar is, en sluit hem anders.
-    pub async fn finish(&mut self, mut resp: Response<C>, now: Duration) {
+    pub(crate) async fn finish(&mut self, mut resp: Response<C>, now: Duration) {
         let addr = core::mem::take(&mut resp.addr);
         if let Some(conn) = resp.release().await {
             if addr.is_empty() {
@@ -166,25 +161,18 @@ impl<C: Conn> Pool<C> {
         }
     }
 
-    /// Als [`Pool::finish`] zonder te wachten: een herbruikbaar antwoord
-    /// komt terug in de pool, de rest valt.
-    pub fn finish_now(&mut self, resp: Response<C>, now: Duration) {
-        if let Some((addr, conn)) = resp.into_reusable()
-            && !addr.is_empty()
-        {
-            self.put_now(&addr, conn, now);
-        }
-    }
-
-    /// Aantal ruststaande verbindingen.
-    pub fn idle_count(&self) -> usize {
-        self.idle.len()
-    }
-
     /// Aantal ruststaande verbindingen naar `addr`: `schema://host:poort`,
     /// zoals `http://srv:80`; het schema hoort bij de sleutel.
-    pub fn idle_for(&self, addr: &str) -> usize {
+    pub(crate) fn idle_for(&self, addr: &str) -> usize {
         self.idle.iter().filter(|ic| ic.addr == addr).count()
+    }
+}
+
+#[cfg(test)]
+impl<C> Pool<C> {
+    /// Aantal ruststaande verbindingen, voor de toetsen.
+    pub(crate) fn idle_count(&self) -> usize {
+        self.idle.len()
     }
 }
 
@@ -214,20 +202,6 @@ impl<D: Dial> Client<D> {
     /// lezen terug met [`Client::finish`].
     pub async fn send(&mut self, call: Call<'_>, now: Duration) -> Result<Response<D::Conn>> {
         follow(&mut self.dialer, Some((&mut self.pool, now)), call).await
-    }
-
-    /// Als [`get`](crate::get), via de pool.
-    pub async fn get(&mut self, url: &str, now: Duration) -> Result<Response<D::Conn>> {
-        let resp = self
-            .send(
-                Call {
-                    url,
-                    ..Call::default()
-                },
-                now,
-            )
-            .await?;
-        check_get(resp).await
     }
 
     /// Geeft de verbinding van een gelezen antwoord terug aan de pool.

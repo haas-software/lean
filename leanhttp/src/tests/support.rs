@@ -16,8 +16,8 @@ use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 use crate::{
-    AsyncRead, AsyncWrite, Close, Dial, Error, Exchange, IoError, Result, Target, close, read,
-    serve, write_all,
+    AsyncRead, AsyncWrite, Close, Conn, Dial, Error, Exchange, Found, IoError, Mux, Result, Target,
+    close, read, serve, write_all,
 };
 
 type Task = Pin<Box<dyn Future<Output = ()>>>;
@@ -474,4 +474,40 @@ pub(crate) async fn round_trip(h: &Handler, request: &str) -> String {
 /// Synchrone vorm van [`round_trip`].
 pub(crate) fn rt(h: &Handler, request: &str) -> String {
     block_on(round_trip(h, request))
+}
+
+/// Een redirect naar `location` met `status`, zoals een gebruiker hem zelf
+/// schrijft (het weggehaalde `Exchange::redirect`, 01-11-2026).
+pub(crate) async fn redirect<C: Conn>(
+    ex: &mut Exchange<'_, C>,
+    location: &str,
+    status: u16,
+) -> Result {
+    ex.header_mut().set("Location", location)?;
+    ex.write_header(status)?;
+    ex.write(b"redirecting to ").await?;
+    ex.write(location.as_bytes()).await?;
+    ex.write(b"\n").await?;
+    Ok(())
+}
+
+/// [`Mux::find`] met het 404- of 405-antwoord dat een gebruiker zelf geeft
+/// (het weggehaalde `Mux::dispatch`, 01-11-2026); `None` betekent dat het
+/// antwoord al verstuurd is.
+pub(crate) async fn dispatch<'m, T, C: Conn>(
+    m: &'m Mux<T>,
+    ex: &mut Exchange<'_, C>,
+) -> Result<Option<&'m T>> {
+    match m.find(&mut ex.req)? {
+        Found::Route(v) => Ok(Some(v)),
+        Found::NotFound => {
+            ex.error(404, "not found").await?;
+            Ok(None)
+        }
+        Found::MethodNotAllowed(allow) => {
+            ex.header_mut().set("Allow", &allow)?;
+            ex.error(405, "method not allowed").await?;
+            Ok(None)
+        }
+    }
 }

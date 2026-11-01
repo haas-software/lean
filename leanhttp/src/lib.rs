@@ -80,7 +80,7 @@ pub use server::{Exchange, Hijacked, Next, Outcome, Raw, Request, Source, serve}
 ///
 /// KAM: 8 KiB per regel. Eén buffer bewaakt beide, zodat een regel nooit
 /// langer kan zijn dan wat de parser in één keer overziet.
-pub const BUF_SIZE: usize = 8 << 10;
+pub(crate) const BUF_SIZE: usize = 8 << 10;
 
 /// Grens voor alle headers van één bericht samen, tussenantwoorden inbegrepen.
 ///
@@ -95,7 +95,7 @@ pub const MAX_HEADER_BYTES: usize = 64 << 10;
 /// houdt 8 KiB per regel; de client leest wat een echte server stuurt, en de
 /// 302 van een GitHub-release draagt een `content-security-policy` van
 /// 9243 bytes (24-10-2026). curl staat 100 KB per regel toe.
-pub const CLIENT_LINE_MAX: usize = MAX_HEADER_BYTES;
+pub(crate) const CLIENT_LINE_MAX: usize = MAX_HEADER_BYTES;
 
 /// Grootste request-body die de server aanneemt.
 ///
@@ -107,39 +107,39 @@ pub const MAX_BODY_BYTES: u64 = 1 << 20;
 /// Grens waarboven een antwoord zonder lengte overgaat op chunked.
 ///
 /// KAM: 64 KiB. Een vergeten `Content-Length` mag nooit onbegrensd bufferen.
-pub const AUTO_CHUNK_BYTES: usize = 64 << 10;
+pub(crate) const AUTO_CHUNK_BYTES: usize = 64 << 10;
 
 /// Maximaal aantal redirects dat de client volgt; gelijk aan de standaard van
 /// Go's `net/http`.
-pub const MAX_REDIRECTS: usize = 10;
+pub(crate) const MAX_REDIRECTS: usize = 10;
 
 /// Termijn voor de eerste requestkop op een verse verbinding.
 ///
 /// Een verbinding die niets zegt, houdt anders een taak uit de pool vast.
-pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+pub(crate) const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Termijn tussen twee verzoeken op een keep-alive-verbinding.
-pub const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+pub(crate) const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Termijn per schrijfactie op de socket, niet per antwoord: een lange stroom
 /// overleeft, een client die niet leest niet.
-pub const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Termijn om een ongelezen body weg te lezen vóór sluiten of hergebruik, zodat
 /// het antwoord aankomt in plaats van een RST.
-pub const DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
+pub(crate) const DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Termijn voor het lezen van een request-body.
 ///
 /// Een client die een `Content-Length` belooft en dan zwijgt, gijzelt anders
 /// een taak en een verbinding voor onbepaalde tijd.
-pub const BODY_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) const BODY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Termijn voor het oordeel op `Expect: 100-continue` bij een gestroomde
 /// upload, als `header_timeout` ruimer of afwezig is.
 ///
 /// Stilte is een fout; de body wordt dan niet verstuurd.
-pub const EXPECT_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const EXPECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Hoe lang één sondering van de leeskant door [`Exchange::reader_gone`]
 /// duurt voordat "de lezer is er nog" het antwoord is.
@@ -149,56 +149,7 @@ pub const EXPECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// schrijf naar een weggevallen lezer niet laat falen is dat nooit. Kort,
 /// want de sondering staat in de lus van de stroom; lang genoeg om op een
 /// blokkerende verbinding één `read` met termijn te zijn.
-pub const PROBE_TIMEOUT: Duration = Duration::from_millis(1);
-
-/// Statuscodes die deze crate of zijn gebruikers sturen.
-///
-/// Een code komt erbij zodra een gebruiker hem stuurt; dit is geen volledige
-/// lijst.
-pub mod status {
-    /// 200.
-    pub const OK: u16 = 200;
-    /// 201.
-    pub const CREATED: u16 = 201;
-    /// 202.
-    pub const ACCEPTED: u16 = 202;
-    /// 204: altijd zonder body en zonder `Content-Length`.
-    pub const NO_CONTENT: u16 = 204;
-    /// 205: altijd zonder body, met `Content-Length: 0`.
-    pub const RESET_CONTENT: u16 = 205;
-    /// 301.
-    pub const MOVED_PERMANENTLY: u16 = 301;
-    /// 302.
-    pub const FOUND: u16 = 302;
-    /// 304: zonder body; een `Content-Length` is informatief.
-    pub const NOT_MODIFIED: u16 = 304;
-    /// 400.
-    pub const BAD_REQUEST: u16 = 400;
-    /// 401.
-    pub const UNAUTHORIZED: u16 = 401;
-    /// 404.
-    pub const NOT_FOUND: u16 = 404;
-    /// 405, altijd met `Allow`.
-    pub const METHOD_NOT_ALLOWED: u16 = 405;
-    /// 406.
-    pub const NOT_ACCEPTABLE: u16 = 406;
-    /// 409.
-    pub const CONFLICT: u16 = 409;
-    /// 413.
-    pub const REQUEST_ENTITY_TOO_LARGE: u16 = 413;
-    /// 417.
-    pub const EXPECTATION_FAILED: u16 = 417;
-    /// 500.
-    pub const INTERNAL_SERVER_ERROR: u16 = 500;
-    /// 501.
-    pub const NOT_IMPLEMENTED: u16 = 501;
-    /// 502.
-    pub const BAD_GATEWAY: u16 = 502;
-    /// 503.
-    pub const SERVICE_UNAVAILABLE: u16 = 503;
-    /// 505.
-    pub const HTTP_VERSION_NOT_SUPPORTED: u16 = 505;
-}
+pub(crate) const PROBE_TIMEOUT: Duration = Duration::from_millis(1);
 
 /// Methodes als constanten, zodat routetabellen geen losse strings dragen.
 ///

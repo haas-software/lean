@@ -222,8 +222,8 @@ fn redirect_wordt_gevolgd() {
         "doel:80",
         h!(ex => {
             match ex.req.path.as_str() {
-                "/een" => ex.redirect("http://doel/twee", 302).await?,
-                "/twee" => ex.redirect("/drie", 301).await?,
+                "/een" => redirect(ex, "http://doel/twee", 302).await?,
+                "/twee" => redirect(ex, "/drie", 301).await?,
                 "/drie" => { ex.write(b"aangekomen").await?; }
                 p => panic!("onverwacht pad {p}"),
             }
@@ -238,7 +238,7 @@ fn redirect_wordt_gevolgd() {
 
 #[test]
 fn redirect_lus_stopt() {
-    let n = net("srv:80", h!(ex => { ex.redirect("/rond", 302).await?; }));
+    let n = net("srv:80", h!(ex => { redirect(ex, "/rond", 302).await?; }));
     block_on(async {
         let mut d = n.clone();
         let err = get(&mut d, "http://srv/").await.unwrap_err();
@@ -480,34 +480,11 @@ fn do_leest_chunked() {
 }
 
 #[test]
-fn do_stream_stopt_op_close() {
-    let gone = Rc::new(Cell::new(false));
-    let g = gone.clone();
+fn do_timeout() {
     let n = net(
         "srv:80",
-        h!(ex => {
-            ex.claim_done().await?;
-            ex.write(b"eerste\n").await?;
-            ex.flush().await?;
-            ex.done().await?;
-            g.set(true);
-        }),
+        h!(_ex => { sleep(Duration::from_secs(10)).await; }),
     );
-    block_on(async {
-        let mut d = n.clone();
-        let mut resp = fetch(&mut d, call("http://srv/")).await.unwrap();
-        let mut buf = [0u8; 7];
-        let got = resp.read(&mut buf).await.unwrap();
-        assert_eq!(&buf[..got], b"eerste\n");
-        assert!(resp.release().await.is_none());
-        sleep(Duration::from_secs(1)).await;
-    });
-    assert!(gone.get(), "de server merkte niet dat de client ophing");
-}
-
-#[test]
-fn do_timeout() {
-    let n = net("srv:80", h!(ex => { ex.done().await?; }));
     block_on(async {
         let mut d = n.clone();
         let r = select(
@@ -549,7 +526,7 @@ fn response_url_na_redirect() {
         "srv:80",
         h!(ex => {
             if ex.req.path == "/start" {
-                return ex.redirect("/hier/", 302).await;
+                return redirect(ex, "/hier/", 302).await;
             }
             ex.write(b"aangekomen").await?;
         }),
@@ -876,7 +853,7 @@ fn redirect_stript_authorization_cross_origin() {
     let g = got.clone();
     let n = net(
         "hop:80",
-        h!(ex => { ex.redirect("http://localhost:8080/", 302).await?; }),
+        h!(ex => { redirect(ex, "http://localhost:8080/", 302).await?; }),
     );
     n.add(
         "localhost:8080",
@@ -917,7 +894,7 @@ fn redirect_stript_ook_bij_andere_poort() {
     let g = got.clone();
     let n = net(
         "h:80",
-        h!(ex => { ex.redirect("http://h:81/", 302).await?; }),
+        h!(ex => { redirect(ex, "http://h:81/", 302).await?; }),
     );
     n.add(
         "h:81",
@@ -957,7 +934,7 @@ fn redirect_behoudt_headers_binnen_de_origin() {
         "h:80",
         h!(ex => {
             if ex.req.path == "/" {
-                return ex.redirect("//h:80/doel", 302).await;
+                return redirect(ex, "//h:80/doel", 302).await;
             }
             *g.borrow_mut() = ex.req.header.get("Authorization").map(str::to_string);
             ex.write(b"ok").await?;
@@ -998,7 +975,7 @@ fn redirect_naar_https_gaat_nooit_plaintext() {
     let l = leaked.clone();
     let n = net(
         "hop:80",
-        h!(ex => { ex.redirect("https://secure:443/", 301).await?; }),
+        h!(ex => { redirect(ex, "https://secure:443/", 301).await?; }),
     );
     n.add(
         "secure:443",
@@ -1112,7 +1089,7 @@ fn timeout_dekt_de_hele_redirect_keten() {
         "hop:80",
         h!(ex => {
             sleep(Duration::from_millis(400)).await;
-            ex.redirect("http://slow/", 302).await?;
+            redirect(ex, "http://slow/", 302).await?;
         }),
     );
     n.add(
@@ -1296,8 +1273,8 @@ fn redirect_alleen_voor_get_en_head() {
     let n = net(
         "srv:80",
         h!(ex => {
-            match m.dispatch(ex).await? {
-                Some(&"van") => ex.redirect("/doel", 302).await?,
+            match dispatch(&m, ex).await? {
+                Some(&"van") => redirect(ex, "/doel", 302).await?,
                 Some(_) => {
                     ex.header_mut().set("Content-Length", "4")?;
                     ex.write(b"doel").await?;
@@ -1751,5 +1728,4 @@ fn gechunkte_body_overleeft_loslaten_na_elke_pending() {
         }
     }
     assert_eq!(body, b"hallo wereld");
-    assert!(resp.is_complete());
 }

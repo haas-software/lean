@@ -26,8 +26,8 @@ use alloc::vec::Vec;
 
 use crate::error::{Error, PatternError, Result};
 use crate::header::{try_string, valid_token};
-use crate::io::{Conn, try_extend};
-use crate::server::{Exchange, Request};
+use crate::io::try_extend;
+use crate::server::Request;
 use crate::url::canonical_path;
 
 /// Een routetabel van patroon naar een waarde van de aanroeper.
@@ -201,24 +201,6 @@ impl<T> Mux<T> {
         Ok(Found::MethodNotAllowed(
             String::from_utf8(list).unwrap_or_default(),
         ))
-    }
-
-    /// Als [`Mux::find`], en antwoordt zelf met 404, of met 405 plus de
-    /// verplichte `Allow` (RFC 9110 §15.5.6); `None` betekent dat het antwoord
-    /// al verstuurd is.
-    pub async fn dispatch<C: Conn>(&self, ex: &mut Exchange<'_, C>) -> Result<Option<&T>> {
-        match self.find(&mut ex.req)? {
-            Found::Route(v) => Ok(Some(v)),
-            Found::NotFound => {
-                ex.error(404, "not found").await?;
-                Ok(None)
-            }
-            Found::MethodNotAllowed(allow) => {
-                ex.header_mut().set("Allow", &allow)?;
-                ex.error(405, "method not allowed").await?;
-                Ok(None)
-            }
-        }
     }
 }
 

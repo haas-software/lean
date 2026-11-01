@@ -533,7 +533,7 @@ The client MUST:
 - return only a proven fully read response to the pool, keyed by
   `scheme://host:port`, so a plain connection never carries an `https` request;
 - bound idle connections both per host and globally, and close them by time
-  (`Pool::sweep` on the caller's timer);
+  (every request sweeps all hosts before it dials);
 - retry one fresh connection when a pooled connection turns out closed (EOF,
   reset, close) before the first response byte, only for replay-safe
   `GET`/`HEAD` and never after a timeout (RFC 9112 §9.3.1); garbage on that

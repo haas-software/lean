@@ -106,33 +106,6 @@ fn serve_flush_streamt() {
 }
 
 #[test]
-fn serve_done_bij_wegvallende_client() {
-    let noticed = Rc::new(Cell::new(false));
-    let n = noticed.clone();
-    let srv = h!(ex => {
-        ex.claim_done().await?;
-        ex.write(b"hoi\n").await?;
-        ex.flush().await?;
-        ex.done().await?;
-        n.set(true);
-    });
-    block_on(async {
-        let (mut c, s) = pipe();
-        srv(s);
-        write_all(&mut c, b"GET /stream HTTP/1.1\r\nHost: x\r\n\r\n")
-            .await
-            .unwrap();
-        let head = read_head(&mut c).await.unwrap();
-        assert!(head.contains("Connection: close"), "{head}");
-        let mut buf = [0u8; 16];
-        read(&mut c, &mut buf).await.unwrap();
-        drop(c);
-        sleep(Duration::from_secs(1)).await;
-    });
-    assert!(noticed.get(), "done sloot niet toen de client verdween");
-}
-
-#[test]
 fn serve_post_met_body() {
     let srv = h!(ex => {
         if ex.req.method != "POST" {
@@ -331,7 +304,7 @@ fn serve_query() {
 fn serve_redirect() {
     let srv = h!(ex => {
         if ex.req.path == "/" {
-            return ex.redirect("/kvm", 302).await;
+            return redirect(ex, "/kvm", 302).await;
         }
         ex.write(b"de pagina").await?;
     });
@@ -627,35 +600,6 @@ fn trage_body_gijzelt_geen_goroutine() {
 }
 
 #[test]
-fn done_overleeft_de_body_timeout() {
-    let verdict = Rc::new(Cell::new(None));
-    let v = verdict.clone();
-    let srv = h!(ex => {
-        ex.read_body_to_end().await?;
-        let fired = matches!(select(ex.done(), sleep(BODY_TIMEOUT + Duration::from_secs(1))).await, Either::Left(_));
-        v.set(Some(fired));
-        ex.header_mut().set("Content-Length", "2")?;
-        ex.write(b"ok").await?;
-    });
-    block_on(async {
-        let (mut c, s) = pipe();
-        srv(s);
-        write_all(
-            &mut c,
-            b"POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 4\r\n\r\nping",
-        )
-        .await
-        .unwrap();
-        read_head(&mut c).await.unwrap();
-    });
-    assert_eq!(
-        verdict.get(),
-        Some(false),
-        "done vuurde terwijl de client er nog is"
-    );
-}
-
-#[test]
 fn server_eist_een_geldige_host() {
     for (name, req) in [
         ("zonder Host", "GET / HTTP/1.1\r\nConnection: close\r\n\r\n"),
@@ -770,7 +714,7 @@ fn head_valt_terug_op_get() {
     m.handle("GET /x", ()).unwrap();
     let m = Rc::new(m);
     let srv = h!(ex => {
-        if m.dispatch(ex).await?.is_some() {
+        if dispatch(&m, ex).await?.is_some() {
             ex.header_mut().set("Content-Length", "5")?;
             ex.write(b"hallo").await?;
         }
@@ -796,7 +740,7 @@ fn tagged_mux(patterns: &[(&str, &'static str)]) -> Handler {
     }
     let m = Rc::new(m);
     h!(ex => {
-        if let Some(tag) = m.dispatch(ex).await? {
+        if let Some(tag) = dispatch(&m, ex).await? {
             ex.header_mut().set("X-Handler", tag)?;
         }
     })
@@ -885,7 +829,7 @@ fn ambigue_escapes_worden_geweigerd() {
     m.handle("GET /admin", "admin").unwrap();
     let m = Rc::new(m);
     let srv = h!(ex => {
-        match m.dispatch(ex).await? {
+        match dispatch(&m, ex).await? {
             Some(&"key") => {
                 let k = ex.req.path_value("key").unwrap_or("").to_string();
                 ex.header_mut().set("X-Key", &k)?;
@@ -925,7 +869,7 @@ fn middleware_en_mux_zien_hetzelfde_pad() {
         if ex.req.path == "/admin" {
             ex.req.path = "/intern".to_string();
         }
-        if let Some(tag) = m.dispatch(ex).await? {
+        if let Some(tag) = dispatch(&m, ex).await? {
             ex.header_mut().set("X-Handler", tag)?;
         }
     });
@@ -1025,7 +969,7 @@ fn rest_houdt_sluitende_slash() {
     m.handle("GET /files/{p...}", ()).unwrap();
     let m = Rc::new(m);
     let srv = h!(ex => {
-        if m.dispatch(ex).await?.is_some() {
+        if dispatch(&m, ex).await?.is_some() {
             let p = format!("[{}]", ex.req.path_value("p").unwrap_or(""));
             ex.header_mut().set("X-P", &p)?;
         }
@@ -1144,7 +1088,7 @@ fn server_randvormen() {
     m.handle("PUT /x", ()).unwrap();
     let m = Rc::new(m);
     let srv = h!(ex => {
-        if m.dispatch(ex).await?.is_some() {
+        if dispatch(&m, ex).await?.is_some() {
             ex.header_mut().set("Content-Length", "2")?;
             ex.write(b"ok").await?;
         }
@@ -1362,39 +1306,6 @@ fn done_overleeft_een_body_van_buiten() {
         "GET /stream HTTP/1.1\r\nHost: x\r\nContent-Length: 1\r\n\r\nX",
     );
     assert!(got.contains(" 200 "), "{got}");
-}
-
-#[test]
-fn request_context() {
-    // Go's Request.Context is in Rust het wachten op done(): hij eindigt
-    // wanneer de client weggaat, en niet eerder.
-    let ended = Rc::new(Cell::new(false));
-    let e = ended.clone();
-    let srv = h!(ex => {
-        ex.claim_done().await?;
-        ex.flush().await?;
-        ex.done().await?;
-        e.set(true);
-    });
-    block_on(async {
-        let (mut c, s) = pipe();
-        srv(s);
-        write_all(&mut c, b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
-            .await
-            .unwrap();
-        sleep(Duration::from_millis(50)).await;
-        assert!(
-            !e_get(&ended),
-            "de lifetime eindigde terwijl de client er nog is"
-        );
-        drop(c);
-        sleep(Duration::from_secs(2)).await;
-    });
-    assert!(ended.get(), "done eindigde niet toen de client wegging");
-}
-
-fn e_get(c: &Rc<Cell<bool>>) -> bool {
-    c.get()
 }
 
 #[test]

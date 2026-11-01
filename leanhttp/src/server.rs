@@ -163,9 +163,9 @@ struct Wire<C> {
     out: Vec<u8>,
     /// De handler bezit de verbinding.
     hijacked: bool,
-    /// `done` bezit de leeskant; niet hergebruiken.
+    /// De wachter (`claim_done`) bezit de leeskant; niet hergebruiken.
     watched: bool,
-    /// De kop van dit antwoord staat op de draad; `done` is nu te laat.
+    /// De kop van dit antwoord staat op de draad; `claim_done` is nu te laat.
     head_sent: bool,
 }
 
@@ -241,9 +241,10 @@ fn usize_of(n: u64) -> usize {
 ///
 /// Verzoeken komen één voor één; het volgende wordt pas gelezen als het
 /// antwoord af is en de body van het vorige leeg is. De fasetermijnen uit KAM
-/// gaan relatief naar de verbinding: [`REQUEST_TIMEOUT`] voor de eerste kop,
-/// [`IDLE_TIMEOUT`] tussen verzoeken, [`BODY_TIMEOUT`] voor de body,
-/// [`WRITE_TIMEOUT`] per socketwrite, [`DRAIN_TIMEOUT`] voor het wegvegen.
+/// gaan relatief naar de verbinding: 15 s voor de eerste kop
+/// (`REQUEST_TIMEOUT`), 60 s tussen verzoeken (`IDLE_TIMEOUT`), 5 s voor de
+/// body (`BODY_TIMEOUT`), 30 s per socketwrite (`WRITE_TIMEOUT`), 2 s voor het
+/// wegvegen (`DRAIN_TIMEOUT`).
 ///
 /// Een kapot verzoek krijgt een kaal foutantwoord (400, 413, 417, 501, 505) en
 /// daarna een gesloten verbinding. Geeft de handler een fout, dan krijgt de
@@ -622,7 +623,7 @@ impl Resp {
 /// `req` is het verzoek; de body leest de handler met [`read_body`]. Het
 /// antwoord begint met [`header_mut`] en [`write_header`] en gaat de draad op
 /// met [`write`] en [`flush`]. Zonder bekende lengte buffert de schrijver tot
-/// [`AUTO_CHUNK_BYTES`] en gaat daarna over op chunked; de eerste flush zonder
+/// 64 KiB (`AUTO_CHUNK_BYTES`) en gaat daarna over op chunked; de eerste flush zonder
 /// lengte kiest meteen chunked.
 ///
 /// [`read_body`]: Exchange::read_body
@@ -720,7 +721,7 @@ impl<'c, C: Conn> Exchange<'c, C> {
     /// De overnemer schrijft zelf de `101` en bezit daarna bytes, framing en
     /// levensloop; termijnen zijn gewist. Na de handler geeft [`serve`] de
     /// verbinding terug als [`Outcome::Hijacked`]. Na een write, een status of
-    /// [`Exchange::done`] kan het niet meer.
+    /// [`Exchange::claim_done`] kan het niet meer.
     pub fn hijack(&mut self) -> Result<Raw<'_, C>> {
         let r = &self.resp;
         if r.started || !r.pending.is_empty() || r.status_set {
@@ -824,7 +825,7 @@ impl<'c, C: Conn> Exchange<'c, C> {
         Ok(())
     }
 
-    /// Claimt de leeskant voor [`Exchange::done`], zonder te wachten.
+    /// Claimt de leeskant voor [`Exchange::reader_gone`], zonder te wachten.
     ///
     /// Daarna zegt het antwoord `Connection: close`, want de wachter verbruikt
     /// de verbinding. Een ongelezen body is invoer van de client, geen fout van
@@ -851,28 +852,9 @@ impl<'c, C: Conn> Exchange<'c, C> {
         Ok(())
     }
 
-    /// Wacht tot de client weggaat: de disconnect-naad voor een lange stroom.
-    ///
-    /// Leest en verwerpt tot FIN, RST of sluiting, en is annuleerbaar: leg hem
-    /// in een `select` naast het eigen werk. Claimt eerst de leeskant (zie
-    /// [`Exchange::claim_done`]); lees de body dus vóór `done`. `done` en
-    /// [`Exchange::hijack`] sluiten elkaar uit.
-    pub async fn done(&mut self) -> Result {
-        self.claim_done().await?;
-        loop {
-            match self.wire.rbuf.fill_some(&mut self.wire.conn).await {
-                Ok(true) => {
-                    let n = self.wire.rbuf.buffered().len();
-                    self.wire.rbuf.consume(n);
-                }
-                _ => return Ok(()),
-            }
-        }
-    }
-
     /// Of de lezer wegging: een FIN, een RST of een gesloten verbinding.
     ///
-    /// Eén sondering van de leeskant met [`PROBE_TIMEOUT`]: een termijn die
+    /// Eén sondering van de leeskant van 1 ms (`PROBE_TIMEOUT`): een termijn die
     /// verloopt is een lezer die er nog is, bytes van de client worden
     /// verworpen (de leeskant is van de wachter), einde of een andere fout
     /// is een lezer die weg is. Zo werkt dit op een coöperatieve verbinding
@@ -941,16 +923,6 @@ impl<'c, C: Conn> Exchange<'c, C> {
             .set("Content-Type", "text/plain; charset=utf-8")?;
         self.write_header(status)?;
         self.write(msg.as_bytes()).await?;
-        self.write(b"\n").await?;
-        Ok(())
-    }
-
-    /// Stuurt een redirect naar `location` met de gevraagde status.
-    pub async fn redirect(&mut self, location: &str, status: u16) -> Result {
-        self.resp.hdr.set("Location", location)?;
-        self.write_header(status)?;
-        self.write(b"redirecting to ").await?;
-        self.write(location.as_bytes()).await?;
         self.write(b"\n").await?;
         Ok(())
     }

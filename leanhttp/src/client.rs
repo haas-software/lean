@@ -86,7 +86,7 @@ pub struct Call<'a> {
     /// Extra requestheaders.
     ///
     /// `Accept-Encoding` is de uitzondering op "van de crate": wie hem zet,
-    /// leest [`Response::encoding`] en decomprimeert zelf.
+    /// leest `Content-Encoding` in [`Response::header`] en decomprimeert zelf.
     pub header: Header,
     /// Een kleine body; `None` betekent geen body.
     pub body: Option<&'a [u8]>,
@@ -189,21 +189,6 @@ impl<C> core::fmt::Debug for Response<C> {
 }
 
 impl<C: Conn> Response<C> {
-    /// `Content-Encoding`, als de server er een stuurde.
-    pub fn encoding(&self) -> Option<&str> {
-        self.header.get("Content-Encoding")
-    }
-
-    /// Zegt of de body chunked komt.
-    pub fn is_chunked(&self) -> bool {
-        self.chunked
-    }
-
-    /// Zegt of het einde van de body bewezen is.
-    pub fn is_complete(&self) -> bool {
-        self.done
-    }
-
     /// Leest body-bytes; `Ok(0)` is het bewezen einde.
     ///
     /// Een verbinding die eindigt voor de lengte of voor de nul-chunk geeft
@@ -403,7 +388,7 @@ pub async fn send<C: Conn>(conn: C, mut call: Call<'_>) -> Result<Response<C>> {
 ///
 /// Geeft elke eindstatus terug, ook 4xx en 5xx: een foutstatus is geen
 /// transportfout. Volgt alleen 301, 302, 303, 307 en 308, alleen voor GET en
-/// HEAD zonder body, hoogstens [`MAX_REDIRECTS`] keer. Een cross-origin
+/// HEAD zonder body, hoogstens tien keer (`MAX_REDIRECTS`). Een cross-origin
 /// redirect gooit alle headers van de aanroeper weg (alleen hij weet welke
 /// gevoelig zijn); `https` naar `http` wordt geweigerd.
 pub async fn fetch<D: Dial>(dialer: &mut D, call: Call<'_>) -> Result<Response<D::Conn>> {

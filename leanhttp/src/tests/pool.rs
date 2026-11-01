@@ -27,9 +27,15 @@ fn ok() -> Handler {
     h!(ex => { ex.write(b"ok").await?; })
 }
 
+/// GET via de pool met de 2xx-eis van [`crate::get`] (het weggehaalde
+/// `Client::get`, 01-11-2026).
+async fn get(cl: &mut Client<Net>, url: &str) -> crate::Result<crate::Response<End>> {
+    crate::client::check_get(cl.send(call(url), now()).await?).await
+}
+
 /// Haalt `url` via de pool, leest de body helemaal en geeft hem terug.
 async fn fetch_all(cl: &mut Client<Net>, url: &str) -> Vec<u8> {
-    let mut resp = cl.get(url, now()).await.unwrap();
+    let mut resp = get(cl, url).await.unwrap();
     let b = resp.read_to_end(1 << 20).await.unwrap();
     cl.finish(resp, now()).await;
     b
@@ -158,8 +164,8 @@ fn keep_alive_max_idle() {
     block_on(async {
         let mut cl = Client::new(n.clone());
         cl.pool.max_idle_per_host = 1;
-        let mut r1 = cl.get("http://srv/a", now()).await.unwrap();
-        let mut r2 = cl.get("http://srv/b", now()).await.unwrap();
+        let mut r1 = get(&mut cl, "http://srv/a").await.unwrap();
+        let mut r2 = get(&mut cl, "http://srv/b").await.unwrap();
         r1.read_to_end(64).await.unwrap();
         r2.read_to_end(64).await.unwrap();
         cl.finish(r1, now()).await;
@@ -192,7 +198,7 @@ fn gzip_doorlaat() {
         )
         .await
         .unwrap();
-        assert_eq!(resp.encoding(), Some("gzip"));
+        assert_eq!(resp.header.get("Content-Encoding"), Some("gzip"));
     });
 }
 
@@ -277,7 +283,6 @@ fn pool_negeert_http10() {
                 );
                 cl.finish(resp, now()).await;
             }
-            cl.pool.close_idle().await;
         });
         assert_eq!(n.accepted("srv:80"), want, "{name}");
     }
@@ -313,7 +318,7 @@ fn pool_ruimt_op_voor_de_dial() {
         assert_eq!(cl.pool.idle_count(), 1);
         sleep(Duration::from_millis(40)).await;
         assert!(
-            cl.get("http://dood/", now()).await.is_err(),
+            get(&mut cl, "http://dood/").await.is_err(),
             "verwachtte een dial-fout"
         );
         assert_eq!(cl.pool.idle_count(), 0, "de sweep zit achter het verzoek");
@@ -374,7 +379,7 @@ fn client_weigert_https_zonder_tls_dialer() {
     block_on(async {
         let mut cl = Client::new(Net::new());
         assert_eq!(
-            cl.get("https://example.invalid/", now()).await.unwrap_err(),
+            get(&mut cl, "https://example.invalid/").await.unwrap_err(),
             Error::HttpsNeedsTls
         );
         assert_eq!(
@@ -557,7 +562,7 @@ fn pool_totaalcap() {
 }
 
 #[test]
-fn finish_now_poolt_alleen_een_hele_body() {
+fn into_reusable_poolt_alleen_een_hele_body() {
     let n = net(
         "srv:80",
         raw("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhallo"),
@@ -568,12 +573,13 @@ fn finish_now_poolt_alleen_een_hele_body() {
         let mut buf = [0u8; 16];
         assert_eq!(resp.read(&mut buf).await, Ok(5));
         assert_eq!(resp.read(&mut buf).await, Ok(0));
-        cl.pool.finish_now(resp, now());
+        let (addr, conn) = resp.into_reusable().expect("een hele body is herbruikbaar");
+        assert!(cl.pool.put_now(&addr, conn, now()));
         assert_eq!(cl.pool.idle_count(), 1);
         // Half gelezen: de verbinding valt, de pool krijgt hem niet.
         let mut resp = cl.send(call("http://srv/"), now()).await.unwrap();
         assert_eq!(resp.read(&mut buf[..2]).await, Ok(2));
-        cl.pool.finish_now(resp, now());
+        assert!(resp.into_reusable().is_none());
         assert_eq!(cl.pool.idle_count(), 0);
     });
 }
