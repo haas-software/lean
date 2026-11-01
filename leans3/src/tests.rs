@@ -818,10 +818,19 @@ fn url_samenstelling() {
 
     let path = Client {
         path_style: true,
-        ..vhost
+        ..vhost.clone()
     };
     let pu = path.url_for("a/b.txt").unwrap();
     assert_eq!((pu.host(), pu.path()), ("s3.example.com", "/bkt/a/b.txt"));
+    // F5: "/" is geen sleutel; anders adresseerde hij de bucket zelf.
+    for c in [&vhost, &path] {
+        assert!(matches!(c.url_for("/"), Err(Error::KeyRequired)));
+        assert!(matches!(c.url_for(""), Err(Error::KeyRequired)));
+        assert_eq!(
+            c.url_for("/a").unwrap().path(),
+            c.url_for("a").unwrap().path()
+        );
+    }
 }
 
 #[test]

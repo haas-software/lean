@@ -500,11 +500,14 @@ impl Client {
     /// Geeft de URL voor `key` in de adresseringsvorm van deze client, voor
     /// eigen operaties zonder de host- of padlogica te dupliceren.
     pub fn url_for(&self, key: &str) -> Result<Url> {
+        // Eerst strippen, dan toetsen: "/" is anders de bucket zelf, en
+        // delete("/") werd DeleteBucket (F5).
+        let key = key.strip_prefix('/').unwrap_or(key);
         if key.is_empty() {
             return Err(Error::KeyRequired);
         }
         let mut u = self.bucket_url()?;
-        push_str(&mut u.path, key.strip_prefix('/').unwrap_or(key))?;
+        push_str(&mut u.path, key)?;
         Ok(u)
     }
 
