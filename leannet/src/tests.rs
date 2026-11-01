@@ -5,7 +5,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::arp::{ARP_CACHE_CAP, ArpReply};
+use crate::arp::ARP_CACHE_CAP;
 use crate::neighbor::{NEIGHBOR_ENTRY_TTL, NeighborEntry, NeighborState};
 use crate::stack::{
     ConnKey, EPHEMERAL_BASE, EPHEMERAL_END, LOOPBACK_MAX, TCP_BACKLOG, TCP_BACKLOG_WAIT_DUR,
@@ -14,7 +14,7 @@ use crate::stack::{
 use crate::tcp::{TCP_FULL_CLOSE_DUR, TcpState};
 use crate::testnet::*;
 use crate::wire::{self, TcpFlags};
-use crate::{Config, Endpoint, Error, ListenHandle, MS, MTU, Result, SEC, Stack, TcpHandle};
+use crate::{Config, Endpoint, Error, ListenHandle, MS, Result, SEC, Stack, TcpHandle};
 
 /// Kiest de stack waarop een helper werkt.
 type Side = fn(&mut Net) -> &mut Stack;
@@ -470,7 +470,7 @@ fn stack_garbage_never_panics() {
         opts: &[2, 0, 0, 0],
     };
     let off = wire::SIZE_ETH + wire::SIZE_IPV4;
-    let n = wire::put_tcp(&mut f[off..], &h, src, IP_A, 0).unwrap();
+    let n = wire::put_tcp_sum(&mut f[off..], &h, src, IP_A, 0, true).unwrap();
     wire::put_ipv4(&mut f[wire::SIZE_ETH..], wire::PROTO_TCP, src, IP_A, n).unwrap();
     let _ = s.receive(&f, now);
     // Een ARP-pakket met een kapotte hardwaresoort.
@@ -943,12 +943,11 @@ fn stack_peer_herstart_zelfde_vier_tupel() {
     let first = dial(&mut net, IP_B, 90, 5 * SEC).expect("eerste verbinding");
     accept(&mut net, sb, l);
     let port1 = net.a.tcp_local(first).unwrap().port;
-    // De node gaat weg zonder RST: een gesloten stack pompt niets meer.
-    net.a.close();
-    net.run_for(50 * MS);
-    // Hetzelfde geheim geeft dezelfde eerste poort, en de klok een andere
-    // ISS: de regressie moet herstel van hetzelfde vier-tupel oefenen.
+    // De node gaat weg zonder RST: de oude stack valt weg (drop). Hetzelfde
+    // geheim geeft dezelfde eerste poort, en de klok een andere ISS: de
+    // regressie moet herstel van hetzelfde vier-tupel oefenen.
     net.a = Stack::new(cfg_a(1 << 20), secret(12345)).unwrap();
+    net.run_for(50 * MS);
     let second =
         dial(&mut net, IP_B, 90, 10 * SEC).expect("herstarte peer kon niet opnieuw verbinden");
     assert_eq!(
@@ -1074,73 +1073,6 @@ fn sock_close_deblokkeer_read() {
         "close deblokkeerde de wachtende read niet"
     );
     assert_eq!(net.a.tcp_read(c, &mut [0; 16]), Err(Error::Closed));
-}
-
-#[test]
-fn stack_close_sluit_alles() {
-    let mut net = Net::pair(1 << 20, 1 << 20);
-    let l = net.b().tcp_listen(90).unwrap();
-    let u = net.b().udp_bind(5353).unwrap();
-    let (wa, accept_woke) = counting_waker();
-    let (wr, read_woke) = counting_waker();
-    net.b().listen_register_waker(l, &wa).unwrap();
-    net.b().udp_register_read_waker(u, &wr).unwrap();
-    let _conn = dial(&mut net, IP_B, 90, 5 * SEC).unwrap();
-    net.run_for(50 * MS);
-    net.b().close();
-    assert!(
-        accept_woke.count() > 0 && read_woke.count() > 0,
-        "wachters bleven hangen na Stack::close"
-    );
-    assert_eq!(net.b().tcp_accept(l), Err(Error::Closed));
-    assert_eq!(net.b().udp_recv_from(u, &mut [0; 64]), Err(Error::Closed));
-    let b = net.b();
-    assert!(
-        b.pot.used == 0 && slots(b) == 0,
-        "na close: pot {} bytes, {} verbindingen",
-        b.pot.used,
-        slots(b)
-    );
-}
-
-#[test]
-fn stack_close_laat_geen_dynamische_protocolopslag_hangen() {
-    let mut net = Net::single(cfg_a(1 << 20), 1);
-    let s = &mut net.a;
-    // De begrensde hoogwaterstand die nog in de rij kan staan als close wint.
-    s.arp.cnt.gave_up = 7;
-    s.arp
-        .nt
-        .insert(
-            [10, 0, 0, 9],
-            NeighborEntry::resolved([2, 0, 0, 0, 0, 9], 0),
-        )
-        .unwrap();
-    s.arp.queue_reply(ArpReply {
-        hw: [0; 6],
-        ip: [10, 0, 0, 9],
-    });
-    s.join_group([224, 0, 0, 251]).unwrap();
-    s.queue_out([10, 0, 0, 9], wire::PROTO_ICMP, &[0u8; 1024]);
-    assert!(s.loopback.push(&[&[0u8; MTU]]));
-    s.close();
-    assert!(
-        s.conns.capacity() == 0
-            && s.listeners.capacity() == 0
-            && s.arp.nt.entries.capacity() == 0
-            && s.groups.capacity() == 0
-            && s.out.is_empty()
-            && s.loopback.is_empty()
-            && s.udp.ports.capacity() == 0,
-        "gesloten stack behield dynamische protocolopslag"
-    );
-    assert_eq!(s.pot.used, 0, "gesloten stack behield bufferbudget");
-    assert_eq!(s.stats().arp.gave_up, 7, "close verloor telemetrie");
-    assert_eq!(
-        s.seed_neighbor([10, 0, 0, 9], [2, 0, 0, 0, 0, 9], 0),
-        Err(Error::StackClosed)
-    );
-    s.close(); // Idempotent.
 }
 
 #[test]
@@ -1317,21 +1249,6 @@ fn stack_route_dood_breekt_de_verbinding() {
 }
 
 #[test]
-fn stack_accept_na_close_geeft_nooit_een_verbinding() {
-    let mut net = Net::pair(1 << 20, 1 << 20);
-    let l = net.b().tcp_listen(90).unwrap();
-    dial(&mut net, IP_B, 90, 5 * SEC).unwrap();
-    net.b().close();
-    for i in 0..32 {
-        assert_eq!(
-            net.b().tcp_accept(l),
-            Err(Error::Closed),
-            "accept #{i} na Stack::close"
-        );
-    }
-}
-
-#[test]
 fn stack_syn_rst_maakt_geen_verbinding() {
     let mut net = lone(IP_B, MAC_B, 1);
     net.a.tcp_listen(90).unwrap();
@@ -1421,7 +1338,7 @@ fn stack_rst_ack_telt_seg_len() {
     let now = net.now;
     net.a.seed_neighbor(IP_A, MAC_A, now).unwrap();
     for (flags, data, seq, want) in [
-        (TcpFlags::NONE, &b"data"[..], 100u32, 104u32),
+        (TcpFlags(0), &b"data"[..], 100u32, 104u32),
         (TcpFlags::SYN | TcpFlags::FIN, &b""[..], 200, 202),
     ] {
         net.wire_a.clear();
@@ -2220,10 +2137,9 @@ fn unacked_blijft_hoog_bij_peer_die_niet_leest() {
     assert!(drained, "na lezen bleef {:?}", net.a.tcp_unacked(c));
 }
 
-/// Een reset terwijl de applicatie het handvat houdt is een fout, geen nul;
-/// `Stack::close` stuurt niets en laat geen bevraagbaar handvat achter.
+/// Een reset terwijl de applicatie het handvat houdt is een fout, geen nul.
 #[test]
-fn unacked_reset_en_stack_close() {
+fn unacked_na_een_reset() {
     let mut net = Net::pair(1 << 20, 1 << 20);
     let (c, s, _) = connected(&mut net, 7005);
     net.a.tcp_write(c, &[9u8; 500]).unwrap();
@@ -2231,18 +2147,6 @@ fn unacked_reset_en_stack_close() {
     net.b().conns[s.idx].as_mut().unwrap().tcp.abort();
     net.settle();
     assert_eq!(net.a.tcp_unacked(c), Err(Error::Reset));
-
-    let (c2, _, _) = connected(&mut net, 7006);
-    let now = net.now;
-    net.a.tcp_write(c2, &[9u8; 500]).unwrap();
-    net.a.close();
-    let mut frame = vec![0u8; 2048];
-    assert_eq!(
-        net.a.poll_transmit(now, &mut frame),
-        None,
-        "close stuurde iets"
-    );
-    assert_eq!(net.a.tcp_unacked(c2), Err(Error::Closed));
 }
 
 // ---- de tabel voor wie doorstuurt (de NAT van HopOS) ----

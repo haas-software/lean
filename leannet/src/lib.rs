@@ -119,15 +119,13 @@
 //! }
 //! ```
 //!
-//! [`Stack::close`] breekt elke verbinding lokaal af en stuurt niets meer:
-//! geen FIN, geen RST (de klaargezette resets gaan met de rijen weg en
-//! [`Stack::poll_transmit`] geeft daarna `None`). Wachters worden gewekt en
-//! elk handvat geeft [`Error::Closed`]. Een drop van de stack doet op de
-//! draad hetzelfde, alleen zonder wekken: het geheugen gaat terug, de wakers
-//! verdwijnen ongewekt. In beide gevallen merkt de peer het pas aan zijn eigen
-//! hertransmissietimers, of aan de RST van een latere stack op hetzelfde
-//! adres. Wie de peer netjes wil laten gaan, sluit eerst elke verbinding met
-//! `tcp_close`, wacht op de flush en pompt tot de FINs bevestigd zijn.
+//! Een drop van de stack breekt elke verbinding lokaal af en stuurt niets
+//! meer: geen FIN, geen RST. Het geheugen gaat terug, de wakers verdwijnen
+//! ongewekt. De peer merkt het pas aan zijn eigen hertransmissietimers, of aan
+//! de RST van een latere stack op hetzelfde adres. Wie de peer netjes wil
+//! laten gaan, sluit eerst elke verbinding met `tcp_close`, wacht op de flush
+//! en pompt tot de FINs bevestigd zijn; wie één adres afbreekt, roept
+//! [`Stack::abort_peer`].
 //!
 //! # Geheugen
 //!
@@ -178,9 +176,9 @@ mod stack;
 mod tcp;
 mod udp;
 mod waker;
-pub mod wire;
+mod wire;
 #[cfg(feature = "ipv6")]
-pub mod wire6;
+mod wire6;
 
 #[cfg(test)]
 mod testnet;
@@ -191,16 +189,13 @@ pub use error::{Error, Result};
 #[cfg(feature = "ipv6")]
 pub use ipv6::{Endpoint6, NdpStats, Udp6Handle};
 pub use socket::{Endpoint, UDP_MAX_PAYLOAD};
-pub use stack::{
-    Config, ETHERNET_HEADER_SIZE, ETHERNET_MAXIMUM_SIZE, ListenHandle, MTU, Stack, Stats,
-    TcpHandle, UdpHandle,
-};
+pub use stack::{Config, ListenHandle, Stack, Stats, TcpHandle, UdpHandle};
 pub use tcp::TcpState;
 
 /// Eén milliseconde in nanoseconden.
-pub const MS: u64 = 1_000_000;
+pub(crate) const MS: u64 = 1_000_000;
 /// Eén seconde in nanoseconden.
-pub const SEC: u64 = 1_000_000_000;
+pub(crate) const SEC: u64 = 1_000_000_000;
 
 /// De tellers van de ARP-machine.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

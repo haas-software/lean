@@ -180,8 +180,6 @@ fn families_rebind_generation_and_budget() {
     s.udp6_close(again);
     s.udp_close(v4);
     assert_eq!(s.budget_free(), free);
-    s.close();
-    assert_eq!(s.udp6_bind(0, NOW), Err(Error::StackClosed));
 }
 #[test]
 fn fixed_mtu_and_invalid_addresses() {
@@ -527,10 +525,6 @@ fn expired_local_identity_suppresses_queued_echo_and_na() {
         let p = w::parse(&f[14..n]).unwrap();
         assert!(p.payload[0] != 129 && p.payload[0] != 136);
     }
-    let before = s.ndp_stats();
-    s.close();
-    assert_eq!(s.ndp_stats(), before);
-    assert!(s.v6.is_none());
 }
 
 #[test]

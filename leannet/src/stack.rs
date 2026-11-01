@@ -28,11 +28,9 @@ use crate::wire::{
 use crate::{ArpStats, Error, Result, SEC};
 
 /// De klassieke Ethernet-MTU.
-pub const MTU: usize = 1500;
-/// Grootte van een Ethernet-header.
-pub const ETHERNET_HEADER_SIZE: usize = SIZE_ETH;
+pub(crate) const MTU: usize = 1500;
 /// Header plus FCS-marge: een frame is hoogstens `mtu + ETHERNET_MAXIMUM_SIZE`.
-pub const ETHERNET_MAXIMUM_SIZE: usize = 18;
+pub(crate) const ETHERNET_MAXIMUM_SIZE: usize = 18;
 
 /// Eerste efemere poort (RFC 6335). Dit bereik blijft los van de
 /// NAT-poorten van hop-os (`net/src/nat.rs`).
@@ -267,8 +265,6 @@ pub struct Stack {
     pub(crate) udp: UdpTable,
     #[cfg(feature = "ipv6")]
     pub(crate) v6: Option<crate::ipv6::State>,
-    #[cfg(feature = "ipv6")]
-    pub(crate) ndp_closed: crate::NdpStats,
     /// Verbindingsloze antwoorden: `[dst 4][proto 1][IP-payload]`.
     pub(crate) out: RecordQueue,
     /// Draadklare UDP-frames.
@@ -279,7 +275,6 @@ pub struct Stack {
     pub(crate) groups: Vec<[u8; 4]>,
     /// Een statisch geplande gateway.
     pub(crate) gw_mac: Option<[u8; 6]>,
-    pub(crate) closed: bool,
     /// Het geheim van de ISS en de efemere poorten (RFC 6528, RFC 6056):
     /// de SipHash-sleutel.
     secret: [u64; 2],
@@ -402,8 +397,6 @@ impl Stack {
             udp: UdpTable::new(),
             #[cfg(feature = "ipv6")]
             v6: None,
-            #[cfg(feature = "ipv6")]
-            ndp_closed: crate::NdpStats::default(),
             out: RecordQueue::new(OUT_QUEUE_CAP, OUT_QUEUE_CAP * 256 + 2 * frame),
             udp_out: RecordQueue::new(
                 UDP_OUT_FRAMES,
@@ -412,7 +405,6 @@ impl Stack {
             loopback: RecordQueue::new(LOOPBACK_MAX, LOOPBACK_MAX * (frame + 2)),
             groups: Vec::new(),
             gw_mac: None,
-            closed: false,
             secret,
             eph_count: 0,
             next_generation: 1,
@@ -503,78 +495,9 @@ impl Stack {
         n
     }
 
-    /// Sluit de stack: breekt verbindingen af en ruimt ze op, sluit
-    /// listeners en geeft UDP-poorten vrij. Elk handvat geeft daarna
-    /// [`Error::Closed`]; wachters worden gewekt.
-    ///
-    /// Tellers blijven leesbaar, maar dynamische protocolopslag (tabellen,
-    /// rijen, loopbackbuffers) gaat meteen terug naar de allocator, zodat een
-    /// bewaarde gesloten stack zijn hoogwaterstand niet vasthoudt.
-    ///
-    /// Er gaat niets meer de draad op: de resets van de afgebroken
-    /// verbindingen verdwijnen met de rijen en [`Stack::poll_transmit`] geeft
-    /// `None`. Een nette afronding is `tcp_close` per verbinding en pompen
-    /// tot [`Stack::tcp_unacked`] nul of [`Error::Closed`] geeft.
-    pub fn close(&mut self) {
-        if self.closed {
-            return;
-        }
-        self.closed = true;
-        for i in 0..self.conns.len() {
-            if let Some(c) = self.conns.get_mut(i).and_then(Option::as_mut) {
-                c.tcp.abort();
-            }
-            self.reap(i);
-            if let Some(c) = self.conns.get_mut(i).and_then(Option::take) {
-                let mut c = c;
-                c.wake();
-            }
-        }
-        for l in self.listeners.iter_mut().flatten() {
-            l.waker.wake();
-        }
-        for i in 0..self.udp.ports.len() {
-            if let Some(mut u) = self.udp.close(i, &mut self.pot) {
-                u.read_waker.wake();
-                u.write_waker.wake();
-            }
-        }
-        #[cfg(feature = "ipv6")]
-        {
-            self.ndp_closed = self.ndp_stats();
-            if let Some(mut v) = self.v6.take() {
-                for i in 0..v.udp.ports.len() {
-                    if let Some(mut u) = v.udp.close(i, &mut self.pot) {
-                        u.read_waker.wake();
-                        u.write_waker.wake();
-                    }
-                }
-            }
-        }
-        self.conns = Vec::new();
-        self.listeners = Vec::new();
-        self.udp = UdpTable::new();
-        self.arp.nt.entries = Vec::new();
-        self.arp.clear_replies();
-        self.groups = Vec::new();
-        self.out.release();
-        self.udp_out.release();
-        self.loopback.release();
-        self.scratch = Vec::new();
-        self.driver.wake();
-    }
-
-    /// Of de stack gesloten is.
-    pub fn is_closed(&self) -> bool {
-        self.closed
-    }
-
     /// Installeert een statische buur. Seeds buiten het subnet (behalve de
     /// gateway) worden geweigerd, want de routering zou ze nooit raadplegen.
     pub fn seed_neighbor(&mut self, ip: [u8; 4], mac: [u8; 6], now: u64) -> Result {
-        if self.closed {
-            return Err(Error::StackClosed);
-        }
         if ip == self.cfg.gw {
             self.gw_mac = Some(mac);
             // Een statische gateway maakt een lopende query overbodig; wek zijn
@@ -635,9 +558,6 @@ impl Stack {
     /// anders `dst` zelf. Onbekend is `None` en start één ontdubbelde vraag,
     /// die [`Stack::poll_transmit`] verstuurt.
     pub fn neighbor(&mut self, dst: [u8; 4], now: u64) -> Option<[u8; 6]> {
-        if self.closed {
-            return None;
-        }
         let mac = self.route(dst, now, true);
         if mac.is_none() {
             self.notify();
@@ -652,7 +572,7 @@ impl Stack {
     /// het verloop.
     pub fn probe_neighbor(&mut self, dst: [u8; 4], now: u64) {
         let (hop, via_arp) = self.next_hop(dst);
-        if self.closed || !via_arp || hop == [0; 4] {
+        if !via_arp || hop == [0; 4] {
             return;
         }
         self.arp.nt.probe(hop, now);
@@ -667,9 +587,6 @@ impl Stack {
     /// blijft de next-hop van een levende flow vers, en zet een buurman met
     /// een vreemd bronadres nooit de gateway.
     pub fn confirm_neighbor(&mut self, src: [u8; 4], mac: [u8; 6], now: u64) {
-        if self.closed {
-            return;
-        }
         if same_subnet(src, self.cfg.ip, self.cfg.prefix) {
             self.learn(src, mac, now);
         } else if self.arp.peek(self.cfg.gw, now) == Some(mac) {
@@ -682,9 +599,6 @@ impl Stack {
     /// Verwerkt één onvertrouwd Ethernet-frame. Korte, verkeerd geadresseerde
     /// of corrupte invoer wordt geteld en valt weg, zonder panic.
     pub fn receive(&mut self, frame: &[u8], now: u64) -> Result {
-        if self.closed {
-            return Err(Error::StackClosed);
-        }
         let Ok(eth) = wire::parse_eth(frame) else {
             self.stats.drop_short_frame += 1;
             return Ok(());
@@ -1192,9 +1106,6 @@ impl Stack {
     /// `frame` hoort [`Stack::frame_len`] bytes te hebben; korter werkt, maar
     /// wat niet past valt weg en wordt geteld.
     pub fn poll_transmit(&mut self, now: u64, frame: &mut [u8]) -> Option<usize> {
-        if self.closed {
-            return None;
-        }
         self.maintain(now);
         // Loopback kan een direct antwoord maken; begrens de rondes zodat één
         // aanroep nooit eindeloos draait.
@@ -1383,9 +1294,6 @@ impl Stack {
     /// `now + 200 ms`: een ontbrekende route kan er een laten hangen, en een
     /// herhaling na 10 ms gaf 100 lege wekken per seconde.
     pub fn next_timeout(&mut self, now: u64) -> Option<u64> {
-        if self.closed {
-            return None;
-        }
         if !self.out.is_empty() || !self.udp_out.is_empty() || !self.loopback.is_empty() {
             return Some(now);
         }

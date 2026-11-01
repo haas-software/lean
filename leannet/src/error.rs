@@ -54,7 +54,10 @@ pub enum Error {
     DeadlineExceeded,
     /// Het handvat is gesloten of bestaat niet meer.
     Closed,
-    /// De stack is gesloten.
+    /// Er is geen stack om de vraag aan te stellen: een eigenaar die (nog)
+    /// geen stack heeft, geeft hem zelf. Sinds `Stack::close` weg is
+    /// (01-11-2026) geeft leannet hem alleen nog in de IPv6-takken na
+    /// `enable_ipv6` die niet kunnen.
     StackClosed,
     /// De peer stuurde een reset; dat is nooit een net einde (EOF).
     Reset,

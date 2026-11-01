@@ -228,9 +228,10 @@ a known next hop at most once per second while its MAC stays in use;
 create or refresh an on-link entry and only refresh the gateway with its
 known MAC. No hint ever changes a MAC; only ARP does.
 
-`Stack::close` aborts every connection locally and sends nothing more; it
-releases budget and drops dynamic tables, queues and loopback buffers, so a
-closed `Stack` kept for its counters does not keep its high-water storage.
+Dropping a `Stack` aborts every connection locally and sends nothing more;
+the peer learns it from its own retransmission timers or from the RST of a
+later stack on the same address. `abort_peer` does the same for one address
+while the stack lives.
 
 ### Deviations from the RFC
 

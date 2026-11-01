@@ -128,7 +128,7 @@ fn udp_roundtrip() {
     let (src, dst) = ([10, 100, 0, 1], [10, 100, 0, 2]);
     let payload = b"dns query";
     buf[SIZE_UDP..SIZE_UDP + payload.len()].copy_from_slice(payload);
-    let n = put_udp(&mut buf, 5353, 53, src, dst, payload.len()).unwrap();
+    let n = put_udp_sum(&mut buf, 5353, 53, src, dst, payload.len(), true).unwrap();
     assert_eq!(n, SIZE_UDP + payload.len());
     let f = parse_udp(&buf[..n + 6]).unwrap();
     assert_eq!(
@@ -162,7 +162,7 @@ fn tcp_roundtrip() {
         wnd: 0xfff0,
         opts: &opts,
     };
-    let n = put_tcp(&mut buf, &h, src, dst, payload.len()).unwrap();
+    let n = put_tcp_sum(&mut buf, &h, src, dst, payload.len(), true).unwrap();
     let f = parse_tcp(&buf[..n]).unwrap();
     assert_eq!(
         (f.src_port(), f.dst_port()),
@@ -188,7 +188,7 @@ fn tcp_roundtrip() {
         ..h
     };
     assert!(
-        put_tcp(&mut buf, &bad_opts, src, dst, 0).is_err(),
+        put_tcp_sum(&mut buf, &bad_opts, src, dst, 0, true).is_err(),
         "unaligned options accepted"
     );
     let mut bad = buf[..n].to_vec();

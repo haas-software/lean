@@ -261,7 +261,7 @@ pub(crate) fn tcp_frame(
         wnd: 1024,
         opts: &[],
     };
-    let n = wire::put_tcp(&mut f[off..], &h, src, dst, data.len()).unwrap();
+    let n = wire::put_tcp_sum(&mut f[off..], &h, src, dst, data.len(), true).unwrap();
     wire::put_ipv4(&mut f[wire::SIZE_ETH..], wire::PROTO_TCP, src, dst, n).unwrap();
     f
 }
@@ -280,7 +280,7 @@ pub(crate) fn udp_frame(
     wire::put_eth(&mut f, dst_mac, src_mac, wire::ETHERTYPE_IPV4).unwrap();
     let off = wire::SIZE_ETH + wire::SIZE_IPV4;
     f[off + wire::SIZE_UDP..].copy_from_slice(data);
-    let n = wire::put_udp(&mut f[off..], sport, dport, src, dst, data.len()).unwrap();
+    let n = wire::put_udp_sum(&mut f[off..], sport, dport, src, dst, data.len(), true).unwrap();
     wire::put_ipv4(&mut f[wire::SIZE_ETH..], wire::PROTO_UDP, src, dst, n).unwrap();
     f
 }

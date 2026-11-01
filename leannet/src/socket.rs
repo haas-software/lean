@@ -19,10 +19,7 @@
 use core::task::Waker;
 
 use crate::multicast::{is_link_local_multicast, is_multicast_ip};
-use crate::stack::{
-    ConnKey, Dial, ListenHandle, Listener, MTU, TCP_BACKLOG, TCP_FLOOR_RX, TCP_FLOOR_TX, TcpHandle,
-    UdpHandle,
-};
+use crate::stack::{ConnKey, Dial, ListenHandle, Listener, MTU, TCP_BACKLOG, TcpHandle, UdpHandle};
 use crate::tcp::TcpState;
 use crate::wire::{SIZE_IPV4, SIZE_UDP};
 use crate::{Error, Result, Stack};
@@ -78,9 +75,6 @@ impl Stack {
     /// Opent een TCP-listener; poort nul kiest een efemere poort. Alleen
     /// verbindingen kosten budget, een listener niet.
     pub fn tcp_listen(&mut self, port: u16) -> Result<ListenHandle> {
-        if self.closed {
-            return Err(Error::StackClosed);
-        }
         let port = if port == 0 {
             self.ephemeral_port(Stack::tcp_port_in_use)?
         } else if self.tcp_port_in_use(port) {
@@ -198,9 +192,6 @@ impl Stack {
         if port == 0 {
             return Err(Error::InvalidPort);
         }
-        if self.closed {
-            return Err(Error::StackClosed);
-        }
         // Faal meteen als een off-subnet-bestemming geen gateway heeft; geen
         // ARP-query zou ooit voortgang maken.
         let (hop, via_arp) = self.next_hop(ip);
@@ -239,7 +230,6 @@ impl Stack {
     ///
     /// Registreer tijdens het wachten [`Stack::tcp_register_write_waker`].
     pub fn tcp_poll_connect(&mut self, h: TcpHandle, now: u64) -> Result {
-        let closed = self.closed;
         let c = self.sock(h)?;
         let Some(dial) = c.dial else {
             return Ok(()); // Al gevestigd, of geaccepteerd.
@@ -250,8 +240,6 @@ impl Stack {
         let reset = c.tcp.reset;
         let outcome = if now >= dial.deadline {
             Err(Error::DeadlineExceeded)
-        } else if closed {
-            Err(Error::StackClosed)
         } else if matches!(state, TcpState::Established | TcpState::CloseWait) {
             // Een peer kan data en FIN sturen voordat deze wachter wakker wordt,
             // en zo door ESTABLISHED naar een nog bruikbare CLOSE-WAIT gaan.
@@ -392,20 +380,6 @@ impl Stack {
         Ok(())
     }
 
-    /// Of de ringen van deze verbinding boven hun vloer groeiden.
-    ///
-    /// Dat is de verbinding die zichzelf indeelt: alleen bulkoverdrachten
-    /// groeien (een vol segment is het groeisignaal), praatzieke lange stromen
-    /// blijven op de vloer. Een gegroeide ontvangstring draagt een
-    /// vensterbelofte die budget vastpint zolang de verbinding open staat (de
-    /// belofte mag niet naar links, RFC 9293). "Snel heeft altijd een eind":
-    /// een pool hoort een gegroeide verbinding te sluiten in plaats van haar
-    /// stil open te houden. leanhttp doet dat aan beide kanten.
-    pub fn tcp_grown(&mut self, h: TcpHandle) -> Result<bool> {
-        let c = self.sock(h)?;
-        Ok(c.tcp.rx.size() > TCP_FLOOR_RX || c.tcp.tx.size() > TCP_FLOOR_TX)
-    }
-
     /// De toestand van de verbinding.
     pub fn tcp_state(&mut self, h: TcpHandle) -> Result<TcpState> {
         Ok(self.sock(h)?.tcp.state)
@@ -495,9 +469,6 @@ impl Stack {
 
     /// Bindt een UDP-poort; nul kiest een efemere.
     pub fn udp_bind(&mut self, port: u16) -> Result<UdpHandle> {
-        if self.closed {
-            return Err(Error::StackClosed);
-        }
         let port = if port == 0 {
             self.ephemeral_port(|s, p| s.udp.bound(p))?
         } else {

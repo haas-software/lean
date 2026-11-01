@@ -90,10 +90,4 @@ impl RecordQueue {
         self.records -= 1;
         Some(n)
     }
-
-    /// Laat alles vallen en geeft de opslag terug aan de allocator.
-    pub(crate) fn release(&mut self) {
-        self.ring = Ring::default();
-        self.records = 0;
-    }
 }

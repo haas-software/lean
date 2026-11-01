@@ -135,7 +135,7 @@ pub(crate) const TCP_FIN_WAIT2_DUR: u64 = 60 * SEC;
 /// De klassieke MSS zonder optie.
 pub(crate) const TCP_DEFAULT_MSS: usize = 536;
 /// De MSS-klem zonder geadverteerde MSS: MTU 1500 min IP- en TCP-header.
-const TCP_CLASSIC_MSS: usize = crate::MTU - 40;
+const TCP_CLASSIC_MSS: usize = crate::stack::MTU - 40;
 /// RTO's zonder geldige ACK voor het passieve embryo (SYN-RECEIVED): de
 /// SYN|ACK gaat er zes keer uit, na 0, 1, 3, 7, 15 en 31 s, en na 63 s geeft
 /// het op. RFC 9293 §3.8.3 vraagt minstens drie minuten (een SHOULD); dit is

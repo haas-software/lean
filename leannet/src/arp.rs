@@ -75,11 +75,6 @@ impl ArpTable {
         }
     }
 
-    /// Laat alle wachtende antwoorden vallen.
-    pub(crate) fn clear_replies(&mut self) {
-        self.replies_len = 0;
-    }
-
     /// Geeft een bekende MAC of start één ontdubbelde query. Mislukte queries
     /// blijven even negatief gecachet; wachters falen via `no_answer`.
     pub(crate) fn resolve(&mut self, ip: [u8; 4], now: u64) -> Option<[u8; 6]> {

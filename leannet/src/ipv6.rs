@@ -666,9 +666,6 @@ fn rio_prefix(o: &[u8]) -> Result<[u8; 16]> {
 impl Stack {
     /// Activeert IPv6 op eerste gebruik; ongebruikte stacks alloceren geen IPv6-tabellen.
     pub fn enable_ipv6(&mut self, now: u64) -> Result {
-        if self.closed {
-            return Err(Error::StackClosed);
-        }
         if self.v6.is_none() {
             self.v6 = Some(State::new(self.cfg.mac, now)?);
             self.notify();
@@ -683,9 +680,9 @@ impl Stack {
     }
     /// De meetlat van de optionele IPv6-baan.
     pub fn ndp_stats(&self) -> NdpStats {
-        self.v6.as_ref().map_or(self.ndp_closed, |v| v.stats)
+        self.v6.as_ref().map_or(NdpStats::default(), |v| v.stats)
     }
-    /// Joint uitsluitend link-scoped multicast; geldt tot de stack sluit.
+    /// Joint uitsluitend link-scoped multicast; geldt zolang de stack leeft.
     pub fn join_group6(&mut self, group: [u8; 16], now: u64) -> Result {
         if !w::is_link_group(group) {
             return Err(Error::InvalidIpv6);

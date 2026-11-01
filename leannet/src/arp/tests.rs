@@ -243,7 +243,7 @@ fn arp_answers_request() {
         "reply sender"
     );
     assert_eq!(
-        (r.target_hw(), r.target_ip()),
+        (<[u8; 6]>::try_from(&buf[18..24]).unwrap(), r.target_ip()),
         (PEER_MAC, PEER_IP),
         "reply target"
     );

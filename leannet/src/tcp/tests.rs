@@ -1902,7 +1902,7 @@ fn tcp_peer_mss_wordt_geklemd() {
         mss: 9000,
         ..Seg::default()
     });
-    assert_eq!(c.peer_mss, crate::MTU - 40);
+    assert_eq!(c.peer_mss, crate::stack::MTU - 40);
 }
 
 #[test]

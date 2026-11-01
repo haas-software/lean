@@ -52,9 +52,6 @@ impl Stack {
         if !is_link_local_multicast(group) {
             return Err(Error::NotLinkLocalMulticast { ip: group });
         }
-        if self.closed {
-            return Err(Error::StackClosed);
-        }
         if self.joined(group) {
             return Ok(());
         }

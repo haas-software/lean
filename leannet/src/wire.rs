@@ -10,42 +10,43 @@
 use crate::{Error, Result};
 
 /// EtherType van IPv4.
-pub const ETHERTYPE_IPV4: u16 = 0x0800;
+pub(crate) const ETHERTYPE_IPV4: u16 = 0x0800;
 /// EtherType van ARP.
-pub const ETHERTYPE_ARP: u16 = 0x0806;
-/// EtherType van IPv6 (alleen herkend om hem stil te laten liggen).
-pub const ETHERTYPE_IPV6: u16 = 0x86dd;
+pub(crate) const ETHERTYPE_ARP: u16 = 0x0806;
+/// EtherType van IPv6.
+#[cfg(feature = "ipv6")]
+pub(crate) const ETHERTYPE_IPV6: u16 = 0x86dd;
 
 /// IP-protocolnummer van ICMP.
-pub const PROTO_ICMP: u8 = 1;
+pub(crate) const PROTO_ICMP: u8 = 1;
 /// IP-protocolnummer van TCP.
-pub const PROTO_TCP: u8 = 6;
+pub(crate) const PROTO_TCP: u8 = 6;
 /// IP-protocolnummer van UDP.
-pub const PROTO_UDP: u8 = 17;
+pub(crate) const PROTO_UDP: u8 = 17;
 
 /// ARP-opcode voor een vraag.
-pub const ARP_REQUEST: u16 = 1;
+pub(crate) const ARP_REQUEST: u16 = 1;
 /// ARP-opcode voor een antwoord.
-pub const ARP_REPLY: u16 = 2;
+pub(crate) const ARP_REPLY: u16 = 2;
 
 /// Het Ethernet-broadcastadres.
-pub const BCAST_MAC: [u8; 6] = [0xff; 6];
+pub(crate) const BCAST_MAC: [u8; 6] = [0xff; 6];
 /// RFC 919's limited broadcast; directed broadcast hangt van de configuratie af.
-pub const BCAST_IP: [u8; 4] = [255; 4];
+pub(crate) const BCAST_IP: [u8; 4] = [255; 4];
 
 /// Grootte van een Ethernet-header (dst, src, EtherType).
-pub const SIZE_ETH: usize = 14;
+pub(crate) const SIZE_ETH: usize = 14;
 /// Grootte van een Ethernet/IPv4-ARP-payload.
-pub const SIZE_ARP: usize = 28;
+pub(crate) const SIZE_ARP: usize = 28;
 /// Grootte van een IPv4-header zonder opties.
-pub const SIZE_IPV4: usize = 20;
+pub(crate) const SIZE_IPV4: usize = 20;
 /// Grootte van een UDP-header.
-pub const SIZE_UDP: usize = 8;
+pub(crate) const SIZE_UDP: usize = 8;
 /// Grootte van een TCP-header zonder opties.
-pub const SIZE_TCP: usize = 20;
+pub(crate) const SIZE_TCP: usize = 20;
 /// Kleinste Ethernet-frame zonder FCS; kortere frames worden met nullen
 /// aangevuld zodat oude bufferinhoud niet lekt.
-pub const MIN_FRAME: usize = 60;
+pub(crate) const MIN_FRAME: usize = 60;
 
 /// Leest een big-endian `u16` op `off`; buiten de slice is het nul.
 ///
@@ -108,35 +109,35 @@ fn need(b: &[u8], need: usize) -> Result {
 
 /// Een view over een Ethernet-frame: dst(6), src(6), EtherType(2), payload.
 #[derive(Clone, Copy, Debug)]
-pub struct Eth<'a>(&'a [u8]);
+pub(crate) struct Eth<'a>(&'a [u8]);
 
 /// Valideert de minimale lengte en geeft een view.
-pub fn parse_eth(b: &[u8]) -> Result<Eth<'_>> {
+pub(crate) fn parse_eth(b: &[u8]) -> Result<Eth<'_>> {
     need(b, SIZE_ETH)?;
     Ok(Eth(b))
 }
 
 impl<'a> Eth<'a> {
     /// Het doel-MAC-adres.
-    pub fn dst(&self) -> [u8; 6] {
+    pub(crate) fn dst(&self) -> [u8; 6] {
         arr(self.0, 0)
     }
     /// Het bron-MAC-adres.
-    pub fn src(&self) -> [u8; 6] {
+    pub(crate) fn src(&self) -> [u8; 6] {
         arr(self.0, 6)
     }
     /// Het EtherType-veld.
-    pub fn ether_type(&self) -> u16 {
+    pub(crate) fn ether_type(&self) -> u16 {
         be16(self.0, 12)
     }
     /// Alles na de header.
-    pub fn payload(&self) -> &'a [u8] {
+    pub(crate) fn payload(&self) -> &'a [u8] {
         self.0.get(SIZE_ETH..).unwrap_or(&[])
     }
 }
 
 /// Schrijft een Ethernet-header in `b`; faalt als `b` te kort is.
-pub fn put_eth(b: &mut [u8], dst: [u8; 6], src: [u8; 6], ether_type: u16) -> Result {
+pub(crate) fn put_eth(b: &mut [u8], dst: [u8; 6], src: [u8; 6], ether_type: u16) -> Result {
     need(b, SIZE_ETH)?;
     put_bytes(b, 0, &dst);
     put_bytes(b, 6, &src);
@@ -148,10 +149,10 @@ pub fn put_eth(b: &mut [u8], dst: [u8; 6], src: [u8; 6], ether_type: u16) -> Res
 
 /// Een view over de 28-byte Ethernet/IPv4-ARP-payload.
 #[derive(Clone, Copy, Debug)]
-pub struct Arp<'a>(&'a [u8]);
+pub(crate) struct Arp<'a>(&'a [u8]);
 
 /// Valideert lengte en de Ethernet/IPv4-ARP-indeling.
-pub fn parse_arp(b: &[u8]) -> Result<Arp<'_>> {
+pub(crate) fn parse_arp(b: &[u8]) -> Result<Arp<'_>> {
     need(b, SIZE_ARP)?;
     if be16(b, 0) != 1
         || be16(b, 2) != ETHERTYPE_IPV4
@@ -165,29 +166,25 @@ pub fn parse_arp(b: &[u8]) -> Result<Arp<'_>> {
 
 impl Arp<'_> {
     /// De opcode ([`ARP_REQUEST`] of [`ARP_REPLY`]).
-    pub fn op(&self) -> u16 {
+    pub(crate) fn op(&self) -> u16 {
         be16(self.0, 6)
     }
     /// Het hardware-adres van de afzender.
-    pub fn sender_hw(&self) -> [u8; 6] {
+    pub(crate) fn sender_hw(&self) -> [u8; 6] {
         arr(self.0, 8)
     }
     /// Het IPv4-adres van de afzender.
-    pub fn sender_ip(&self) -> [u8; 4] {
+    pub(crate) fn sender_ip(&self) -> [u8; 4] {
         arr(self.0, 14)
     }
-    /// Het hardware-adres van het doel.
-    pub fn target_hw(&self) -> [u8; 6] {
-        arr(self.0, 18)
-    }
     /// Het IPv4-adres van het doel.
-    pub fn target_ip(&self) -> [u8; 4] {
+    pub(crate) fn target_ip(&self) -> [u8; 4] {
         arr(self.0, 24)
     }
 }
 
 /// Schrijft een volledig ARP-pakket en geeft zijn lengte.
-pub fn put_arp(
+pub(crate) fn put_arp(
     b: &mut [u8],
     op: u16,
     sender_hw: [u8; 6],
@@ -211,13 +208,13 @@ pub fn put_arp(
 
 /// Een view over een IPv4-header zonder opties (IHL=5).
 #[derive(Clone, Copy, Debug)]
-pub struct Ipv4<'a>(&'a [u8]);
+pub(crate) struct Ipv4<'a>(&'a [u8]);
 
 /// Valideert versie, IHL, totale lengte en fragmentatie.
 ///
 /// Opties en fragmenten krijgen elk een eigen fout: ze horen niet op onze
 /// paden (DF, MTU 1500), en stil accepteren zou ze voor de meetlat verbergen.
-pub fn parse_ipv4(b: &[u8]) -> Result<Ipv4<'_>> {
+pub(crate) fn parse_ipv4(b: &[u8]) -> Result<Ipv4<'_>> {
     need(b, SIZE_IPV4)?;
     let vihl = b.first().copied().unwrap_or(0);
     if vihl >> 4 != 4 {
@@ -242,31 +239,27 @@ pub fn parse_ipv4(b: &[u8]) -> Result<Ipv4<'_>> {
 
 impl<'a> Ipv4<'a> {
     /// De totale lengte uit de header.
-    pub fn total_len(&self) -> usize {
+    pub(crate) fn total_len(&self) -> usize {
         usize::from(be16(self.0, 2))
     }
-    /// De TTL.
-    pub fn ttl(&self) -> u8 {
-        self.0.get(8).copied().unwrap_or(0)
-    }
     /// Het protocolnummer.
-    pub fn proto(&self) -> u8 {
+    pub(crate) fn proto(&self) -> u8 {
         self.0.get(9).copied().unwrap_or(0)
     }
     /// Het bronadres.
-    pub fn src(&self) -> [u8; 4] {
+    pub(crate) fn src(&self) -> [u8; 4] {
         arr(self.0, 12)
     }
     /// Het doeladres.
-    pub fn dst(&self) -> [u8; 4] {
+    pub(crate) fn dst(&self) -> [u8; 4] {
         arr(self.0, 16)
     }
     /// De payload binnen `total_len`, zonder Ethernet-opvulling.
-    pub fn payload(&self) -> &'a [u8] {
+    pub(crate) fn payload(&self) -> &'a [u8] {
         self.0.get(SIZE_IPV4..self.total_len()).unwrap_or(&[])
     }
     /// Controleert de header-checksum.
-    pub fn checksum_ok(&self) -> bool {
+    pub(crate) fn checksum_ok(&self) -> bool {
         checksum(self.0.get(..SIZE_IPV4).unwrap_or(&[])) == 0
     }
 }
@@ -277,7 +270,7 @@ impl<'a> Ipv4<'a> {
 /// De TTL volgt de scope van de bestemming: link-local multicast krijgt 255
 /// (RFC 6762 §11), wat veilig is omdat routers dat blok nooit doorsturen
 /// (RFC 5771); al het andere krijgt de gerouteerde standaard 64.
-pub fn put_ipv4(
+pub(crate) fn put_ipv4(
     b: &mut [u8],
     proto: u8,
     src: [u8; 4],
@@ -311,10 +304,10 @@ pub fn put_ipv4(
 
 /// Een view over een UDP-header en payload.
 #[derive(Clone, Copy, Debug)]
-pub struct Udp<'a>(&'a [u8]);
+pub(crate) struct Udp<'a>(&'a [u8]);
 
 /// Valideert de header en het lengteveld.
-pub fn parse_udp(b: &[u8]) -> Result<Udp<'_>> {
+pub(crate) fn parse_udp(b: &[u8]) -> Result<Udp<'_>> {
     need(b, SIZE_UDP)?;
     let len = usize::from(be16(b, 4));
     if len > b.len() || len < SIZE_UDP {
@@ -328,31 +321,27 @@ pub fn parse_udp(b: &[u8]) -> Result<Udp<'_>> {
 
 impl<'a> Udp<'a> {
     /// De bronpoort.
-    pub fn src_port(&self) -> u16 {
+    pub(crate) fn src_port(&self) -> u16 {
         be16(self.0, 0)
     }
     /// De doelpoort.
-    pub fn dst_port(&self) -> u16 {
+    pub(crate) fn dst_port(&self) -> u16 {
         be16(self.0, 2)
     }
     /// Het lengteveld (header plus payload).
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         usize::from(be16(self.0, 4))
     }
-    /// Waar als het lengteveld alleen de header telt.
-    pub fn is_empty(&self) -> bool {
-        self.len() <= SIZE_UDP
-    }
     /// Het checksumveld.
-    pub fn checksum(&self) -> u16 {
+    pub(crate) fn checksum(&self) -> u16 {
         be16(self.0, 6)
     }
     /// De payload binnen het lengteveld.
-    pub fn payload(&self) -> &'a [u8] {
+    pub(crate) fn payload(&self) -> &'a [u8] {
         self.0.get(SIZE_UDP..self.len()).unwrap_or(&[])
     }
     /// Controleert de pseudo-header-checksum; RFC 768 staat nul toe als "afwezig".
-    pub fn checksum_ok(&self, src: [u8; 4], dst: [u8; 4]) -> bool {
+    pub(crate) fn checksum_ok(&self, src: [u8; 4], dst: [u8; 4]) -> bool {
         if self.checksum() == 0 {
             return true;
         }
@@ -360,19 +349,8 @@ impl<'a> Udp<'a> {
     }
 }
 
-/// Schrijft header en checksum voor een payload die al op `b[SIZE_UDP..]` staat.
-pub fn put_udp(
-    b: &mut [u8],
-    src_port: u16,
-    dst_port: u16,
-    src: [u8; 4],
-    dst: [u8; 4],
-    payload_len: usize,
-) -> Result<usize> {
-    put_udp_sum(b, src_port, dst_port, src, dst, payload_len, true)
-}
-
-/// Is [`put_udp`] met een optionele checksum: een link die geheugen is (een
+/// Schrijft header en checksum voor een payload die al op `b[SIZE_UDP..]`
+/// staat. De checksum is optioneel (`sum`): een link die geheugen is (een
 /// ring tussen twee stacks op één machine) kent geen bitfouten, en beide
 /// kanten spreken via [`crate::Config::link_trusted`] af het veld leeg te laten.
 pub(crate) fn put_udp_sum(
@@ -409,24 +387,22 @@ pub(crate) fn put_udp_sum(
 
 /// TCP-vlaggen als bitmasker.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct TcpFlags(pub u16);
+pub(crate) struct TcpFlags(pub(crate) u16);
 
 impl TcpFlags {
-    /// Geen vlaggen.
-    pub const NONE: TcpFlags = TcpFlags(0);
     /// FIN: de zender is klaar.
-    pub const FIN: TcpFlags = TcpFlags(1 << 0);
+    pub(crate) const FIN: TcpFlags = TcpFlags(1 << 0);
     /// SYN: synchroniseer volgnummers.
-    pub const SYN: TcpFlags = TcpFlags(1 << 1);
+    pub(crate) const SYN: TcpFlags = TcpFlags(1 << 1);
     /// RST: reset de verbinding.
-    pub const RST: TcpFlags = TcpFlags(1 << 2);
+    pub(crate) const RST: TcpFlags = TcpFlags(1 << 2);
     /// PSH: lever direct af.
-    pub const PSH: TcpFlags = TcpFlags(1 << 3);
+    pub(crate) const PSH: TcpFlags = TcpFlags(1 << 3);
     /// ACK: het ack-veld is geldig.
-    pub const ACK: TcpFlags = TcpFlags(1 << 4);
+    pub(crate) const ACK: TcpFlags = TcpFlags(1 << 4);
 
     /// Waar als elke vlag in `mask` staat.
-    pub fn has(self, mask: TcpFlags) -> bool {
+    pub(crate) fn has(self, mask: TcpFlags) -> bool {
         self.0 & mask.0 == mask.0
     }
 }
@@ -446,10 +422,10 @@ impl core::ops::BitOrAssign for TcpFlags {
 
 /// Een view over een TCP-header en payload.
 #[derive(Clone, Copy, Debug)]
-pub struct Tcp<'a>(&'a [u8]);
+pub(crate) struct Tcp<'a>(&'a [u8]);
 
 /// Valideert de header en de data-offset.
-pub fn parse_tcp(b: &[u8]) -> Result<Tcp<'_>> {
+pub(crate) fn parse_tcp(b: &[u8]) -> Result<Tcp<'_>> {
     need(b, SIZE_TCP)?;
     let f = Tcp(b);
     let off = f.header_len();
@@ -461,83 +437,69 @@ pub fn parse_tcp(b: &[u8]) -> Result<Tcp<'_>> {
 
 impl<'a> Tcp<'a> {
     /// De bronpoort.
-    pub fn src_port(&self) -> u16 {
+    pub(crate) fn src_port(&self) -> u16 {
         be16(self.0, 0)
     }
     /// De doelpoort.
-    pub fn dst_port(&self) -> u16 {
+    pub(crate) fn dst_port(&self) -> u16 {
         be16(self.0, 2)
     }
     /// Het volgnummer.
-    pub fn seq(&self) -> u32 {
+    pub(crate) fn seq(&self) -> u32 {
         be32(self.0, 4)
     }
     /// Het bevestigingsnummer.
-    pub fn ack(&self) -> u32 {
+    pub(crate) fn ack(&self) -> u32 {
         be32(self.0, 8)
     }
     /// De vlaggen (negen bits).
-    pub fn flags(&self) -> TcpFlags {
+    pub(crate) fn flags(&self) -> TcpFlags {
         TcpFlags(be16(self.0, 12) & 0x01ff)
     }
     /// Het vensterveld zoals op de draad.
-    pub fn window(&self) -> u16 {
+    pub(crate) fn window(&self) -> u16 {
         be16(self.0, 14)
     }
-    /// Het checksumveld.
-    pub fn checksum(&self) -> u16 {
-        be16(self.0, 16)
-    }
     /// De headerlengte uit de data-offset.
-    pub fn header_len(&self) -> usize {
+    pub(crate) fn header_len(&self) -> usize {
         usize::from(self.0.get(12).copied().unwrap_or(0) >> 4) * 4
     }
     /// De ruwe optiebytes tussen vaste header en payload.
-    pub fn options(&self) -> &'a [u8] {
+    pub(crate) fn options(&self) -> &'a [u8] {
         self.0.get(SIZE_TCP..self.header_len()).unwrap_or(&[])
     }
     /// De databytes; de aanroeper begrenst het frame tot de IPv4-payload.
-    pub fn payload(&self) -> &'a [u8] {
+    pub(crate) fn payload(&self) -> &'a [u8] {
         self.0.get(self.header_len()..).unwrap_or(&[])
     }
     /// Controleert de pseudo-header-checksum.
-    pub fn checksum_ok(&self, src: [u8; 4], dst: [u8; 4]) -> bool {
+    pub(crate) fn checksum_ok(&self, src: [u8; 4], dst: [u8; 4]) -> bool {
         pseudo_checksum(PROTO_TCP, src, dst, self.0) == 0
     }
 }
 
 /// Een uitgaande TCP-header in machinevorm, zonder payload.
 #[derive(Clone, Copy, Debug)]
-pub struct TcpHeader<'o> {
+pub(crate) struct TcpHeader<'o> {
     /// Bronpoort.
-    pub src_port: u16,
+    pub(crate) src_port: u16,
     /// Doelpoort.
-    pub dst_port: u16,
+    pub(crate) dst_port: u16,
     /// Volgnummer.
-    pub seq: u32,
+    pub(crate) seq: u32,
     /// Bevestigingsnummer.
-    pub ack: u32,
+    pub(crate) ack: u32,
     /// Vlaggen.
-    pub flags: TcpFlags,
+    pub(crate) flags: TcpFlags,
     /// Vensterveld zoals op de draad.
-    pub wnd: u16,
+    pub(crate) wnd: u16,
     /// Opties, een veelvoud van vier bytes (de aanroeper levert NOP/EOL-vulling).
-    pub opts: &'o [u8],
+    pub(crate) opts: &'o [u8],
 }
 
 /// Schrijft header, opties en checksum voor een payload die al op
-/// `b[SIZE_TCP + opts.len()..]` staat.
-pub fn put_tcp(
-    b: &mut [u8],
-    h: &TcpHeader<'_>,
-    src: [u8; 4],
-    dst: [u8; 4],
-    payload_len: usize,
-) -> Result<usize> {
-    put_tcp_sum(b, h, src, dst, payload_len, true)
-}
-
-/// Is [`put_tcp`] met een optionele checksum; zie [`put_udp_sum`] voor het waarom.
+/// `b[SIZE_TCP + opts.len()..]` staat; de checksum is optioneel, zie
+/// [`put_udp_sum`] voor het waarom.
 pub(crate) fn put_tcp_sum(
     b: &mut [u8],
     h: &TcpHeader<'_>,
@@ -575,12 +537,12 @@ pub(crate) fn put_tcp_sum(
 // ---- Internet-checksum (RFC 1071) ----
 
 /// Vouwt en complementeert de one's-complement-som van `b`; geldige data geeft nul.
-pub fn checksum(b: &[u8]) -> u16 {
+pub(crate) fn checksum(b: &[u8]) -> u16 {
     fold_checksum(sum_bytes(0, b))
 }
 
 /// Is de checksum inclusief de IPv4-pseudo-header (bron, doel, protocol, lengte).
-pub fn pseudo_checksum(proto: u8, src: [u8; 4], dst: [u8; 4], segment: &[u8]) -> u16 {
+pub(crate) fn pseudo_checksum(proto: u8, src: [u8; 4], dst: [u8; 4], segment: &[u8]) -> u16 {
     let mut ph = [0u8; 12];
     ph[0..4].copy_from_slice(&src);
     ph[4..8].copy_from_slice(&dst);
