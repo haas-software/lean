@@ -50,7 +50,11 @@ pub enum Error {
     /// De methode was geen token.
     InvalidMethod,
     /// `CONNECT` vraagt een tunnel, en die bestaat hier niet.
-    Connect,
+    ConnectMethod,
+    /// De dialer kon geen verbinding geven: geen adres, geen route, een
+    /// weigering, of een configuratie die vóór de dial al faalde (zoals
+    /// WebDial zonder klok). De dialer zelf weet meer (`last_error`).
+    Dial,
     /// Het verzoek was geen HTTP/1.1.
     UnsupportedVersion,
     /// Het requestdoel was niet in origin-form.
@@ -216,7 +220,8 @@ impl fmt::Display for Error {
             Error::InvalidHeaderName => f.write_str("invalid header name"),
             Error::MalformedRequestLine => f.write_str("malformed request line"),
             Error::InvalidMethod => f.write_str("invalid method"),
-            Error::Connect => f.write_str("CONNECT is not supported (never a tunnel)"),
+            Error::ConnectMethod => f.write_str("CONNECT is not supported (never a tunnel)"),
+            Error::Dial => f.write_str("the dialer could not open a connection"),
             Error::UnsupportedVersion => f.write_str("unsupported protocol version"),
             Error::NotOriginForm => f.write_str("only origin-form request targets are supported"),
             Error::BadTarget => f.write_str("bad request target"),

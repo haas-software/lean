@@ -588,7 +588,7 @@ fn build_request(call: &Call<'_>, url: &Url<'_>, keep_alive: bool) -> Result<Vec
     if method == "CONNECT" {
         // CONNECT vraagt na 2xx een rauwe tunnel die deze client niet heeft;
         // hem als gewoon verzoek versturen is onveilig.
-        return Err(Error::Connect);
+        return Err(Error::ConnectMethod);
     }
     if call.body.is_some() && call.body_reader.is_some() {
         return Err(Error::BodyConflict);

@@ -1620,7 +1620,7 @@ fn client_weigert_connect() {
         },
     ))
     .unwrap_err();
-    assert_eq!(err, Error::Connect);
+    assert_eq!(err, Error::ConnectMethod);
     assert!(err.to_string().contains("CONNECT"));
 }
 

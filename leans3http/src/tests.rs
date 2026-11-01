@@ -90,7 +90,7 @@ impl Dial for Net {
             .conns
             .borrow_mut()
             .pop_front()
-            .ok_or(leanhttp::Error::Connect)?;
+            .ok_or(leanhttp::Error::Dial)?;
         Ok(Wire {
             turns: turns.into(),
             ready: Vec::new(),

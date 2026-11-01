@@ -506,7 +506,7 @@ fn parse_request_line(line: &str) -> core::result::Result<Request, Reject> {
         // Een tunnel bestaat hier niet.
         return Err(Reject::Bad {
             status: 501,
-            err: Error::Connect,
+            err: Error::ConnectMethod,
             drain: false,
         });
     }

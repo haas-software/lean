@@ -361,13 +361,13 @@ fn web_dial_is_plain_for_http_and_refuses_https_without_name_clock_or_entropy() 
     let mut no_clock = WebDial::new(Tcp::default(), leantls::MOZILLA_ROOTS, || None, fresh);
     assert!(matches!(
         block_on(no_clock.dial(target("s3.example.test"))),
-        Err(leanhttp::Error::Connect)
+        Err(leanhttp::Error::Dial)
     ));
     assert_eq!(no_clock.last_error(), Some(Error::NoClock));
     let mut no_entropy = WebDial::new(Tcp::default(), leantls::MOZILLA_ROOTS, clock, || None);
     assert!(matches!(
         block_on(no_entropy.dial(target("s3.example.test"))),
-        Err(leanhttp::Error::Connect)
+        Err(leanhttp::Error::Dial)
     ));
     assert_eq!(no_entropy.last_error(), Some(Error::NoEntropy));
     // Alleen de http-dial raakte de netstack.

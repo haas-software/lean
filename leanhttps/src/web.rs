@@ -73,7 +73,7 @@ where
     /// Een weigering vóór er een verbinding opengaat.
     fn refuse(&mut self, why: Error) -> leanhttp::Error {
         self.last_error = Some(why);
-        leanhttp::Error::Connect
+        leanhttp::Error::Dial
     }
 }
 

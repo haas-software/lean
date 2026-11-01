@@ -212,7 +212,7 @@ fn io(error: leanhttp::Error) -> IoError {
             IoError::Closed
         }
         leanhttp::Error::UnexpectedEof | leanhttp::Error::Eof => IoError::UnexpectedEof,
-        leanhttp::Error::Connect => IoError::Other("leans3http: connect failed"),
+        leanhttp::Error::Dial => IoError::Other("leans3http: dial failed"),
         _ => IoError::Other("leans3http: HTTP failed"),
     }
 }

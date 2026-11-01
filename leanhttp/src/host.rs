@@ -291,11 +291,11 @@ impl<R: Reactor + Clone> Dial for TcpDial<R> {
             Ok(socket) => socket,
             Err(e) => {
                 self.last_error = Some(e);
-                return Err(Error::Connect);
+                return Err(Error::Dial);
             }
         };
         self.last_error = None;
-        TcpConn::new(socket, self.reactor.clone(), self.idle).map_err(|_| Error::Connect)
+        TcpConn::new(socket, self.reactor.clone(), self.idle).map_err(|_| Error::Dial)
     }
 }
 
