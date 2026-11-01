@@ -16,14 +16,10 @@ use crate::{Error, Result};
 
 /// Hoe lang één wachtfase van een DORA-ronde hoogstens duurt.
 ///
-/// Vaste rondes van 3 s, tot de deadline van de aanroeper. RFC 2131 §4.1
-/// vraagt (SHOULD) een backoff van 4, 8, 16 tot 64 s met ±1 s jitter; dit
-/// wijkt bewust af (besluit L6, 01-11-2026, en KAM.md). De reden: de lease
-/// komt vóór de stack, dus de node staat stil tot hij er is, en de aanroeper
-/// geeft één deadline voor de hele bring-up. Een vaste ronde houdt die
-/// wachttijd voorspelbaar en de client zonder entropie; een node die na een
-/// stroomstoring vier keer vraagt in plaats van één keer, kost de server
-/// niets dat telt op een LAN van een paar nodes.
+/// Vaste rondes van 3 s tot de deadline van de aanroeper, niet de backoff
+/// met jitter van RFC 2131 §4.1 (SHOULD; besluit L6, 01-11-2026, KAM.md).
+/// Waarom: de lease komt vóór de stack, de wachttijd blijft zo voorspelbaar,
+/// en een LAN van een paar nodes merkt niets van een paar extra vragen.
 const ROUND_WINDOW: Duration = Duration::from_secs(3);
 
 /// Het minimale venster voor de ACK, ook voorbij de totale deadline.

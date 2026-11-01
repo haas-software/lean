@@ -678,7 +678,10 @@ Herhaling in de client:
 - tot de deadline.
 
 RFC 2131 §4.1 vraagt een gerandomiseerde exponentiële backoff (4, 8, 16 tot
-64 s, ±1 s). Dat is een SHOULD. Zie §10 en vraag 6.
+64 s, ±1 s). Dat is een SHOULD. **Besluit (L6, 01-11):** vaste rondes. De
+lease komt vóór de stack, de wachttijd blijft zo voorspelbaar, en een LAN
+van een paar nodes merkt niets van een paar extra vragen. De reden staat bij
+`ROUND_WINDOW` (`client.rs`) en in KAM. Zie §10 en vraag 6.
 
 ### 5.2 `Keeper`: de lease in leven houden (`keeper.rs`)
 
@@ -1530,7 +1533,7 @@ een kernel-FLIP").
 
 | Nu | Voorstel |
 | --- | --- |
-| De rondes van 3 s, zonder backoff of jitter (H9) | Zie vraag 6. Het voorstel: RFC 2131 §4.1 (4, 8, 16 s, ±1 s uit de entropie van de aanroeper) binnen de totale termijn. Bij "100 nodes na een stroomstoring" vraagt niet iedereen tegelijk |
+| De rondes van 3 s, zonder backoff of jitter (H9) | Zie vraag 6. Het voorstel: RFC 2131 §4.1 (4, 8, 16 s, ±1 s uit de entropie van de aanroeper) binnen de totale termijn. Bij "100 nodes na een stroomstoring" vraagt niet iedereen tegelijk. **Besluit L6 (01-11): vaste rondes blijven** (§5.1) |
 | De grace van 64 frames (S9) | Een ronde sluit pas als de aanroeper meldt dat de ring leeg is (`Client::ring_empty`), niet op een telling. Eén regel minder toestand. Mag ook blijven: hij heeft een reden |
 | Een NAK in DORA genegeerd (F14) | Meteen een nieuwe ronde |
 | De leaseklok vanaf de ACK (F13) | De client geeft het tijdstip van zijn REQUEST mee in `Bound` (`Lease::requested_at`), en `Keeper::new` rekent daarvanaf |
@@ -1635,7 +1638,9 @@ Per stuk eerst een grep op gebruikers in de zes repo's, dan pas weghalen.
 6. **DHCP-backoff en jitter.** Houden op vaste rondes van 3 s (simpel), of
    RFC 2131 §4.1 met jitter (de SHOULD, en minder tegelijk vragen na een
    storing)? Voorstel: de RFC. De client krijgt dan één `u32` entropie van
-   de aanroeper.
+   de aanroeper. **Besluit (L6, 01-11): vaste rondes**, want de lease komt
+   vóór de stack, de wachttijd blijft voorspelbaar, en een LAN van een paar
+   nodes merkt niets van een paar extra vragen (§5.1).
 7. **De abort voor de slotstop (S4).** Per adres (`abort_peer(ip)`) of per
    handvat (`tcp_abort(h)`)? De kern kent per slot het adres, niet elk
    handvat. Voorstel: per adres.

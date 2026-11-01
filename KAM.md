@@ -316,7 +316,7 @@ The client and keeper MUST:
 
 | What | RFC | Here | Reason |
 |---|---|---|---|
-| DISCOVER retransmission | 4, 8, 16 up to 64 s with ±1 s jitter (RFC 2131 §4.1, SHOULD) | fixed rounds of 3 s until the caller's deadline | Decision L6 (2026-11-01). The lease comes before the stack, so the node stands still until it has one, and the caller gives one deadline for the whole bring-up. A fixed round keeps that wait predictable and the client free of entropy. |
+| DISCOVER retransmission | 4, 8, 16 up to 64 s with ±1 s jitter (RFC 2131 §4.1, SHOULD) | fixed rounds of 3 s until the caller's deadline | Decision L6 (2026-11-01). The lease comes before the stack, so the node stands still until it has one, and the caller gives one deadline for the whole bring-up. A fixed round keeps that wait predictable and the client free of entropy, and a LAN of a few nodes does not notice a few extra requests. |
 | The grace of 64 frames after a window | — | read what is already in the ring | An answer that arrived before the window closed is still valid; 64 bounds how long a broadcast storm can stretch the bring-up. |
 
 ### MURDER
