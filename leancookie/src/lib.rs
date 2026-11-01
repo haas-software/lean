@@ -17,9 +17,8 @@
 //! Er is geen public suffix list: die kost honderden KiB en verandert elke
 //! maand. Zonder die lijst is `a.co.uk` → `co.uk` (onveilig) niet te scheiden
 //! van `sub.example.com` → `example.com` (goed). Een cookie is daarom
-//! host-only; een `Domain`-attribuut wordt geweigerd en geteld in
-//! [`Jar::rejected`], tenzij de aanroeper met een [`DomainPolicy`] zegt dat
-//! het mag.
+//! host-only; een `Domain`-attribuut wordt geweigerd, tenzij de aanroeper
+//! met een [`DomainPolicy`] zegt dat het mag.
 //!
 //! SameSite hoort bij navigatiebeleid van een browser en ontbreekt, net als
 //! `__Host-`/`__Secure-`-prefixen en grenzen per domein naast de totale grens
@@ -30,10 +29,10 @@
 //! # Examples
 //!
 //! ```
-//! use leancookie::{Jar, Url};
+//! use leancookie::{HostOnly, Jar, Url};
 //!
 //! let now = 1_790_000_000; // Unix-seconden, van de klok van de aanroeper.
-//! let mut jar = Jar::new(0);
+//! let mut jar = Jar::with_policy(0, HostOnly);
 //! let u = Url::parse("https://example.com/login")?;
 //! // Na een antwoord:
 //! jar.set_from(&u, ["sid=abc; Path=/; Secure"], now)?;
@@ -75,8 +74,8 @@ const MAX_HOST: usize = 253;
 
 /// Een fout uit deze crate.
 ///
-/// Een kromme `Set-Cookie` is geen fout maar een telling (zie
-/// [`Jar::rejected`]): één kapotte cookie mag geen verzoek laten falen.
+/// Een kromme `Set-Cookie` is geen fout: hij wordt overgeslagen, want één
+/// kapotte cookie mag geen verzoek laten falen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
     /// De heap kon `bytes` bytes niet leveren.
@@ -350,19 +349,8 @@ pub struct Jar<P = HostOnly> {
     /// bij gelijke lengte de volgorde van aanmaken. Door de lijst zo te
     /// houden, hoeft [`Jar::header`] niets te sorteren of te verzamelen.
     list: Vec<Cookie>,
-    /// Het aantal geweigerde cookies.
-    rejected: u64,
     /// Het beleid voor `Domain`.
     policy: P,
-}
-
-impl Jar<HostOnly> {
-    /// Maakt een host-only jar; `max == 0` kiest [`DEFAULT_MAX`].
-    ///
-    /// Alloceert nog niets: de lijst groeit per cookie, faalbaar, tot `max`.
-    pub fn new(max: usize) -> Self {
-        Self::with_policy(max, HostOnly)
-    }
 }
 
 impl<P: DomainPolicy> Jar<P> {
@@ -372,32 +360,14 @@ impl<P: DomainPolicy> Jar<P> {
         Jar {
             max: if max == 0 { DEFAULT_MAX } else { max },
             list: Vec::new(),
-            rejected: 0,
             policy,
         }
     }
 
-    /// Het aantal bewaarde cookies.
-    pub fn len(&self) -> usize {
-        self.list.len()
-    }
-
-    /// Er is geen enkele cookie bewaard.
-    pub fn is_empty(&self) -> bool {
-        self.list.is_empty()
-    }
-
-    /// Het aantal geweigerde cookies: krom, verboden domein, al verlopen, of
-    /// boven het maximum.
-    ///
-    /// Zonder deze teller is een mislukte login stil.
-    pub fn rejected(&self) -> u64 {
-        self.rejected
-    }
-
     /// Verwerkt de `Set-Cookie`-velden van één antwoord van `url`.
     ///
-    /// Een onbruikbaar veld wordt geteld, niet teruggegeven. Alleen een
+    /// Een onbruikbaar veld (krom, verboden domein, al verlopen of boven het
+    /// maximum) wordt overgeslagen, niet teruggegeven. Alleen een
     /// allocatie die faalt is een fout; de velden daarna worden dan niet
     /// meer verwerkt.
     pub fn set_from<'l, I>(&mut self, url: &Url<'_>, lines: I, now: i64) -> Result
@@ -405,9 +375,8 @@ impl<P: DomainPolicy> Jar<P> {
         I: IntoIterator<Item = &'l str>,
     {
         for line in lines {
-            match self.parse(line, url, now) {
-                Some(p) => self.store(&p, now)?,
-                None => self.reject(),
+            if let Some(p) = self.parse(line, url, now) {
+                self.store(&p, now)?;
             }
         }
         Ok(())
@@ -445,11 +414,6 @@ impl<P: DomainPolicy> Jar<P> {
         Ok(out)
     }
 
-    /// Telt één geweigerde cookie.
-    fn reject(&mut self) {
-        self.rejected = self.rejected.saturating_add(1);
-    }
-
     /// Voegt toe of vervangt op de RFC-identiteit (naam, host, pad).
     fn store(&mut self, p: &Parsed<'_>, now: i64) -> Result {
         let expired = p.expires.is_some_and(|t| t <= now);
@@ -469,7 +433,6 @@ impl<P: DomainPolicy> Jar<P> {
         }
         // Een onbekende cookie die al verlopen is, wist niets.
         if expired || self.list.len() >= self.max {
-            self.reject();
             return Ok(());
         }
         self.list.try_reserve(1).map_err(|_| Error::Alloc {
@@ -815,6 +778,10 @@ mod tests {
     /// Een vaste "nu": 2026-09-21 02:13:20 UTC.
     const NOW: i64 = 1_790_000_000;
 
+    fn host_only(max: usize) -> Jar {
+        Jar::with_policy(max, HostOnly)
+    }
+
     fn url(raw: &str) -> Url<'_> {
         Url::parse(raw).unwrap()
     }
@@ -857,7 +824,7 @@ mod tests {
 
     #[test]
     fn test_zetten_en_terugsturen() {
-        let mut j = Jar::new(0);
+        let mut j = host_only(0);
         set(
             &mut j,
             "http://example.com/app/page",
@@ -876,7 +843,7 @@ mod tests {
 
     #[test]
     fn test_pad_regels() {
-        let mut j = Jar::new(0);
+        let mut j = host_only(0);
         set(&mut j, "http://example.com/a/b/page", &["x=1"]);
         for (path, want) in [
             ("/a/b/page", "x=1"),
@@ -900,20 +867,13 @@ mod tests {
             ("example.com", "other.com", false),
             ("example.com", "ample.com", false),
         ] {
-            let mut j = Jar::new(0);
+            let mut j = host_only(0);
             set(
                 &mut j,
                 &format!("http://{host}/"),
                 &[&format!("x=1; Domain={domain}")],
             );
-            assert_eq!(j.len() == 1, ok, "host {host} + Domain={domain}");
-            if !ok {
-                assert_ne!(
-                    j.rejected(),
-                    0,
-                    "host {host} + Domain={domain}: geweigerd maar niet geteld"
-                );
-            }
+            assert_eq!(j.list.len() == 1, ok, "host {host} + Domain={domain}");
         }
     }
 
@@ -941,7 +901,7 @@ mod tests {
                 &[&format!("x=1; Domain={d}")],
             );
             assert_eq!(
-                j2.len(),
+                j2.list.len(),
                 0,
                 "Domain={d} werd toegestaan ondanks de labelgrens-regel"
             );
@@ -954,7 +914,7 @@ mod tests {
             &["a=1; Domain=gethop.org"],
         );
         set(&mut j3, "http://a.co.uk/", &["b=2; Domain=co.uk"]);
-        assert_eq!(j3.len(), 1, "alleen het eigen domein");
+        assert_eq!(j3.list.len(), 1, "alleen het eigen domein");
     }
 
     #[test]
@@ -980,7 +940,7 @@ mod tests {
 
     #[test]
     fn test_secure() {
-        let mut j = Jar::new(0);
+        let mut j = host_only(0);
         set(&mut j, "https://example.com/", &["s=1; Secure", "p=2"]);
         assert_eq!(
             header(&mut j, "http://example.com/"),
@@ -992,7 +952,7 @@ mod tests {
 
     #[test]
     fn test_verval_en_verwijderen() {
-        let mut j = Jar::new(0);
+        let mut j = host_only(0);
         let u = "http://example.com/";
         set(&mut j, u, &["a=1; Max-Age=3600", "b=2; Max-Age=0", "c=3"]);
         let got = header(&mut j, u);
@@ -1023,7 +983,7 @@ mod tests {
     fn test_expires_vormen() {
         let future = NOW + 24 * 3600;
         for layout in 0..3 {
-            let mut j = Jar::new(0);
+            let mut j = host_only(0);
             let u = "http://example.com/";
             let date = format(future, layout);
             set(&mut j, u, &[&format!("x=1; Expires={date}")]);
@@ -1038,7 +998,7 @@ mod tests {
 
     #[test]
     fn test_overschrijven() {
-        let mut j = Jar::new(0);
+        let mut j = host_only(0);
         let u = "http://example.com/";
         set(&mut j, u, &["sid=oud"]);
         set(&mut j, u, &["sid=nieuw"]);
@@ -1047,12 +1007,12 @@ mod tests {
             "sid=nieuw",
             "een tweede login moet de eerste vervangen"
         );
-        assert_eq!(j.len(), 1);
+        assert_eq!(j.list.len(), 1);
     }
 
     #[test]
     fn test_kromme_regels() {
-        let mut j = Jar::new(0);
+        let mut j = host_only(0);
         set(
             &mut j,
             "http://example.com/",
@@ -1064,23 +1024,21 @@ mod tests {
                 "x=met\nnieuweregel",
             ],
         );
-        assert_eq!(j.len(), 0, "kromme regels opgeslagen");
-        assert_eq!(j.rejected(), 5, "geweigerde regels moeten zichtbaar zijn");
+        assert_eq!(j.list.len(), 0, "kromme regels opgeslagen");
     }
 
     #[test]
     fn test_quoted_value() {
-        let mut j = Jar::new(0);
+        let mut j = host_only(0);
         set(&mut j, "http://example.com/", &[r#"x="met spaties""#]);
         assert_eq!(header(&mut j, "http://example.com/"), "x=met spaties");
     }
 
     #[test]
     fn test_max_cookies() {
-        let mut j = Jar::new(2);
+        let mut j = host_only(2);
         set(&mut j, "http://example.com/", &["a=1", "b=2", "c=3"]);
-        assert_eq!(j.len(), 2);
-        assert_eq!(j.rejected(), 1);
+        assert_eq!(j.list.len(), 2);
     }
 
     // Go toetste hier dat net/http en crypto/tls niet in de import-graaf
@@ -1088,7 +1046,7 @@ mod tests {
     // no_std-build het; de test houdt het basisgeval.
     #[test]
     fn test_geen_net_http() {
-        let mut j = Jar::new(0);
+        let mut j = host_only(0);
         set(&mut j, "http://example.com/", &["x=1"]);
         assert_eq!(
             header(&mut j, "http://example.com/"),
@@ -1120,10 +1078,10 @@ mod tests {
     #[test]
     fn test_host_hoofdletters() {
         // Hoofdletters in de URL-host maken geen andere cookie.
-        let mut j = Jar::new(0);
+        let mut j = host_only(0);
         set(&mut j, "http://Example.com/", &["a=1"]);
         set(&mut j, "http://EXAMPLE.com/", &["a=2"]);
-        assert_eq!(j.len(), 1);
+        assert_eq!(j.list.len(), 1);
         assert_eq!(header(&mut j, "http://example.COM/"), "a=2");
     }
 
