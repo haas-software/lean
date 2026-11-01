@@ -811,25 +811,31 @@ fn url_samenstelling() {
         ..Client::default()
     };
     let u = vhost.bucket_url().unwrap();
-    assert_eq!((u.host(), u.path()), ("bkt.s3.example.com", "/"));
+    assert_eq!(
+        (u.host.as_str(), u.path.as_str()),
+        ("bkt.s3.example.com", "/")
+    );
     let ou = vhost.url_for("a/b.txt").unwrap();
-    assert_eq!((ou.host(), ou.path()), ("bkt.s3.example.com", "/a/b.txt"));
-    assert!(ou.is_https());
+    assert_eq!(
+        (ou.host.as_str(), ou.path.as_str()),
+        ("bkt.s3.example.com", "/a/b.txt")
+    );
+    assert!(ou.https);
 
     let path = Client {
         path_style: true,
         ..vhost.clone()
     };
     let pu = path.url_for("a/b.txt").unwrap();
-    assert_eq!((pu.host(), pu.path()), ("s3.example.com", "/bkt/a/b.txt"));
+    assert_eq!(
+        (pu.host.as_str(), pu.path.as_str()),
+        ("s3.example.com", "/bkt/a/b.txt")
+    );
     // F5: "/" is geen sleutel; anders adresseerde hij de bucket zelf.
     for c in [&vhost, &path] {
         assert!(matches!(c.url_for("/"), Err(Error::KeyRequired)));
         assert!(matches!(c.url_for(""), Err(Error::KeyRequired)));
-        assert_eq!(
-            c.url_for("/a").unwrap().path(),
-            c.url_for("a").unwrap().path()
-        );
+        assert_eq!(c.url_for("/a").unwrap().path, c.url_for("a").unwrap().path);
     }
 }
 

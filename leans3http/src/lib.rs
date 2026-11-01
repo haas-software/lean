@@ -80,7 +80,7 @@ impl Default for Limits {
 
 /// Telt ontvangen bodybytes per request-target, terwijl ze binnenkomen;
 /// bijvoorbeeld voor een voortgangsbalk tijdens een herstel.
-pub type Observer = Box<dyn FnMut(&str, usize)>;
+type Observer = Box<dyn FnMut(&str, usize)>;
 
 /// Een verbinding die een [`Reply`] na zijn laatste byte teruggeeft.
 struct Back<C> {
@@ -132,12 +132,6 @@ impl<D: Dial, K: Clock + Clone> Http<D, K> {
     /// [`IoError`] kan dragen.
     pub fn last_error(&self) -> Option<leanhttp::Error> {
         self.last_error
-    }
-
-    /// De dialer, bijvoorbeeld voor `WebDial::last_error`: de reden van een
-    /// mislukte TLS-handshake.
-    pub fn dialer(&self) -> &D {
-        &self.client.dialer
     }
 
     /// Neemt de verbindingen terug die antwoorden na hun laatste byte

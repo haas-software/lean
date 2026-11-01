@@ -415,7 +415,7 @@ pub struct DeleteOptions<'a> {
 
 /// Een verzoek-URL in de adresseringsvorm van de [`Client`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Url {
+pub(crate) struct Url {
     /// Of het schema https is.
     https: bool,
     /// De host, bij virtual-hosted met de bucket ervoor.
@@ -427,24 +427,9 @@ pub struct Url {
 }
 
 impl Url {
-    /// Of het schema https is.
-    pub fn is_https(&self) -> bool {
-        self.https
-    }
-
-    /// De host (met eventuele poort).
-    pub fn host(&self) -> &str {
-        &self.host
-    }
-
-    /// Het ongeëscapete pad.
-    pub fn path(&self) -> &str {
-        &self.path
-    }
-
     /// Het request-target voor de draad: pad en query in precies de vorm die
     /// getekend wordt.
-    pub fn target(&self) -> Result<String> {
+    pub(crate) fn target(&self) -> Result<String> {
         let mut t = sigv4::canonical_uri(&self.path)?;
         if !self.query.is_empty() {
             push_str(&mut t, "?")?;
@@ -497,9 +482,8 @@ impl fmt::Debug for Client {
 }
 
 impl Client {
-    /// Geeft de URL voor `key` in de adresseringsvorm van deze client, voor
-    /// eigen operaties zonder de host- of padlogica te dupliceren.
-    pub fn url_for(&self, key: &str) -> Result<Url> {
+    /// Geeft de URL voor `key` in de adresseringsvorm van deze client.
+    pub(crate) fn url_for(&self, key: &str) -> Result<Url> {
         // Eerst strippen, dan toetsen: "/" is anders de bucket zelf, en
         // delete("/") werd DeleteBucket (F5).
         let key = key.strip_prefix('/').unwrap_or(key);
