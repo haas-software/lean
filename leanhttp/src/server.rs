@@ -32,8 +32,8 @@ use crate::io::{
 };
 use crate::url::{canonical_path, clean_escapes, percent_decode};
 use crate::{
-    AUTO_CHUNK_BYTES, BODY_TIMEOUT, BUF_SIZE, DRAIN_TIMEOUT, IDLE_TIMEOUT, MAX_BODY_BYTES,
-    MAX_HEADER_BYTES, PROBE_TIMEOUT, REQUEST_TIMEOUT, WRITE_TIMEOUT,
+    AUTO_CHUNK_BYTES, BODY_TIMEOUT, BUF_SIZE, DRAIN_TIMEOUT, MAX_BODY_BYTES, MAX_HEADER_BYTES,
+    PROBE_TIMEOUT, REQUEST_TIMEOUT, WRITE_TIMEOUT,
 };
 
 /// Wat een [`Source`] per beurt aan [`Exchange::stream`] geeft.
@@ -137,13 +137,59 @@ impl Request {
     }
 }
 
-/// Wat [`serve`] teruggeeft als de verbinding klaar is.
+/// Wat [`serve`] teruggeeft als het verzoek klaar is.
 #[derive(Debug)]
 pub enum Outcome<C> {
-    /// De verbinding is gesloten (door de client, een termijn, of `close`).
+    /// De verbinding is gesloten (door de client, een termijn, een fout, of
+    /// omdat client of antwoord om `close` vroeg).
     Closed,
+    /// Het antwoord is weg en de verbinding mag blijven (keep-alive). De
+    /// aanroeper beslist: [`Kept::serve`] voor het volgende verzoek, meestal
+    /// pas als de verbinding leesbaar is, of [`Kept::close`].
+    Kept(Kept<C>),
     /// Een handler nam de verbinding over; de aanroeper is nu eigenaar.
     Hijacked(Hijacked<C>),
+}
+
+/// Een verbinding tussen twee verzoeken: zonder buffers en zonder taak, met
+/// alleen de bytes die de client al vooruit stuurde.
+///
+/// Wie hem laat vallen zonder [`Kept::close`], laat de verbinding vallen
+/// zoals het transport dat doet bij `Drop`; netjes is sluiten.
+#[derive(Debug)]
+pub struct Kept<C> {
+    conn: C,
+    buffered: Vec<u8>,
+}
+
+impl<C: Conn> Kept<C> {
+    /// De verbinding, om op te wachten (leesbaar, gesloten) zonder iets te
+    /// verbruiken.
+    pub fn conn_mut(&mut self) -> &mut C {
+        &mut self.conn
+    }
+
+    /// Of het volgende verzoek al (deels) binnen is: de client pijplijnde.
+    /// Dan niet wachten tot de verbinding leesbaar is, want dat wordt ze
+    /// misschien nooit meer; meteen [`Kept::serve`].
+    pub fn has_buffered(&self) -> bool {
+        !self.buffered.is_empty()
+    }
+
+    /// Bedient het volgende verzoek, zoals [`serve`], met de bytes die al
+    /// binnen waren. De kop krijgt `REQUEST_TIMEOUT` vanaf nu: hoe lang een
+    /// verbinding stil mag zijn vóór het verzoek, bepaalt de aanroeper.
+    pub async fn serve<H>(self, handler: H) -> Result<Outcome<C>>
+    where
+        H: AsyncFnMut(&mut Exchange<'_, C>) -> Result,
+    {
+        serve_from(self.conn, self.buffered, handler).await
+    }
+
+    /// Sluit de verbinding (een FIN; bij TLS eerst een close_notify).
+    pub async fn close(mut self) {
+        let _ = close(&mut self.conn).await;
+    }
 }
 
 /// Een overgenomen verbinding, met de bytes die al gelezen maar nog niet
@@ -237,13 +283,19 @@ fn usize_of(n: u64) -> usize {
     usize::try_from(n).unwrap_or(usize::MAX)
 }
 
-/// Bedient één verbinding tot hij sluit of een handler hem overneemt.
+/// Bedient één verzoek op `conn`.
 ///
-/// Verzoeken komen één voor één; het volgende wordt pas gelezen als het
-/// antwoord af is en de body van het vorige leeg is. De fasetermijnen uit KAM
-/// gaan relatief naar de verbinding: 15 s voor de eerste kop
-/// (`REQUEST_TIMEOUT`), 60 s tussen verzoeken (`IDLE_TIMEOUT`), 5 s voor de
-/// body (`BODY_TIMEOUT`), 30 s per socketwrite (`WRITE_TIMEOUT`), 2 s voor het
+/// Een werker hoort zo bij één verzoek, nooit bij een stille verbinding: mag
+/// de verbinding blijven, dan komt ze terug als [`Outcome::Kept`], zonder
+/// buffers, en de aanroeper bepaalt waar ze wacht (een park op `readable`,
+/// een eigen termijn) en wie het volgende verzoek bedient. Met 16 werkers die
+/// elk hun keep-alive-verbinding vasthielden, legden 16 stille verbindingen de
+/// server stil (gemeten 06-11-2026).
+///
+/// Het volgende verzoek wordt pas gelezen als het antwoord af is en de body
+/// van het vorige leeg is. De fasetermijnen uit KAM gaan relatief naar de
+/// verbinding: 15 s voor de kop (`REQUEST_TIMEOUT`), 5 s voor de body
+/// (`BODY_TIMEOUT`), 30 s per socketwrite (`WRITE_TIMEOUT`), 2 s voor het
 /// wegvegen (`DRAIN_TIMEOUT`).
 ///
 /// Een kapot verzoek krijgt een kaal foutantwoord (400, 413, 417, 501, 505) en
@@ -252,14 +304,23 @@ fn usize_of(n: u64) -> usize {
 /// verbinding dicht; die fout komt hier terug zodat de aanroeper hem logt.
 ///
 /// De verbinding is gesloten als dit `Ok(Outcome::Closed)` of een fout geeft;
-/// bij [`Outcome::Hijacked`] is de aanroeper eigenaar.
-pub async fn serve<C, H>(conn: C, mut handler: H) -> Result<Outcome<C>>
+/// bij [`Outcome::Kept`] en [`Outcome::Hijacked`] is de aanroeper eigenaar.
+pub async fn serve<C, H>(conn: C, handler: H) -> Result<Outcome<C>>
+where
+    C: Conn,
+    H: AsyncFnMut(&mut Exchange<'_, C>) -> Result,
+{
+    serve_from(conn, Vec::new(), handler).await
+}
+
+/// [`serve`] met bytes die al van de client binnen waren.
+async fn serve_from<C, H>(conn: C, buffered: Vec<u8>, mut handler: H) -> Result<Outcome<C>>
 where
     C: Conn,
     H: AsyncFnMut(&mut Exchange<'_, C>) -> Result,
 {
     let mut conn = conn;
-    let bufs = ReadBuf::new().and_then(|r| {
+    let bufs = ReadBuf::with_unread(buffered).and_then(|r| {
         let mut out = Vec::new();
         out.try_reserve_exact(BUF_SIZE)
             .map_err(|_| Error::Alloc { bytes: BUF_SIZE })?;
@@ -280,66 +341,71 @@ where
         watched: false,
         head_sent: false,
     };
-    let mut first = true;
-    let result = loop {
-        wire.set_read_timeout(Some(if first { REQUEST_TIMEOUT } else { IDLE_TIMEOUT }));
-        first = false;
-        let (req, body) = match read_request(&mut wire).await {
-            Ok(r) => r,
-            Err(Reject::Gone) => break Ok(()),
-            Err(Reject::Bad { status, err, drain }) => {
-                let _ = write_bare(&mut wire, status, err).await;
-                // Alleen als de kop een body aankondigde: dan komt het antwoord
-                // aan in plaats van een RST, zonder dat een kale syntaxfout
-                // middelen vasthoudt.
-                if drain {
-                    wire.set_read_timeout(Some(DRAIN_TIMEOUT));
-                    wire.discard(MAX_BODY_BYTES).await;
-                }
-                break Ok(());
+    wire.set_read_timeout(Some(REQUEST_TIMEOUT));
+    let result = match read_request(&mut wire).await {
+        Ok((req, body)) => {
+            // Een body houdt zijn termijn; zonder body gaat hij uit, zodat een
+            // SSE-handler onbeperkt kan stromen.
+            wire.set_read_timeout(body.pending().then_some(BODY_TIMEOUT));
+            let head = req.method == "HEAD";
+            let keep_alive = req.keep_alive;
+            let mut ex = Exchange {
+                req,
+                wire: &mut wire,
+                body,
+                resp: Resp::new(keep_alive, head),
+            };
+            let res = handler(&mut ex).await;
+            if ex.wire.hijacked {
+                return Ok(Outcome::Hijacked(Hijacked {
+                    conn: wire.conn,
+                    buffered: wire.rbuf.into_unread(),
+                }));
             }
-        };
-        // Een body houdt zijn termijn; zonder body gaat hij uit, zodat een
-        // SSE-handler onbeperkt kan stromen.
-        wire.set_read_timeout(body.pending().then_some(BODY_TIMEOUT));
-        wire.head_sent = false;
-        let head = req.method == "HEAD";
-        let keep_alive = req.keep_alive;
-        let mut ex = Exchange {
-            req,
-            wire: &mut wire,
-            body,
-            resp: Resp::new(keep_alive, head),
-        };
-        let res = handler(&mut ex).await;
-        if ex.wire.hijacked {
-            return Ok(Outcome::Hijacked(Hijacked {
-                conn: wire.conn,
-                buffered: wire.rbuf.into_unread(),
-            }));
-        }
-        // Houd de capaciteit voor dit hele verzoek, en sluit dan een gegroeide
-        // (bulk)verbinding: praterige verbindingen blijven klein en herbruikbaar,
-        // een gegroeide geeft zijn budget in één keer terug.
-        if ex.wire.conn.has_grown() {
-            ex.resp.keep_alive = false;
-        }
-        match res {
-            Ok(()) => match ex.settle().await {
-                Ok(true) => continue,
-                Ok(false) => break Ok(()),
-                // Faalde de kop pas bij het afronden (een gebufferd antwoord
-                // met een ongeldige header), dan staat er nog niets op de
-                // draad en krijgt de client alsnog een 500.
+            // Houd de capaciteit voor dit hele verzoek, en sluit dan een
+            // gegroeide (bulk)verbinding: praterige verbindingen blijven klein
+            // en herbruikbaar, een gegroeide geeft zijn budget in één keer
+            // terug.
+            if ex.wire.conn.has_grown() {
+                ex.resp.keep_alive = false;
+            }
+            match res {
+                Ok(()) => match ex.settle().await {
+                    Ok(true) => {
+                        // Geen termijn op een geparkeerde verbinding: hoe
+                        // lang ze stil mag zijn, is van de aanroeper.
+                        wire.set_read_timeout(None);
+                        return Ok(Outcome::Kept(Kept {
+                            conn: wire.conn,
+                            buffered: wire.rbuf.into_unread(),
+                        }));
+                    }
+                    Ok(false) => Ok(()),
+                    // Faalde de kop pas bij het afronden (een gebufferd
+                    // antwoord met een ongeldige header), dan staat er nog
+                    // niets op de draad en krijgt de client alsnog een 500.
+                    Err(e) => {
+                        ex.fail().await;
+                        Err(e)
+                    }
+                },
                 Err(e) => {
                     ex.fail().await;
-                    break Err(e);
+                    Err(e)
                 }
-            },
-            Err(e) => {
-                ex.fail().await;
-                break Err(e);
             }
+        }
+        Err(Reject::Gone) => Ok(()),
+        Err(Reject::Bad { status, err, drain }) => {
+            let _ = write_bare(&mut wire, status, err).await;
+            // Alleen als de kop een body aankondigde: dan komt het antwoord
+            // aan in plaats van een RST, zonder dat een kale syntaxfout
+            // middelen vasthoudt.
+            if drain {
+                wire.set_read_timeout(Some(DRAIN_TIMEOUT));
+                wire.discard(MAX_BODY_BYTES).await;
+            }
+            Ok(())
         }
     };
     let _ = close(&mut wire.conn).await;

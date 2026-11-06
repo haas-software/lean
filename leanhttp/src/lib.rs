@@ -25,8 +25,10 @@
 //!
 //! Wat de crate bezit:
 //!
-//! - de server ([`serve`]): één verbinding, sequentieel, met [`Exchange`] als
-//!   de ene plek waar een handler het verzoek leest en het antwoord schrijft;
+//! - de server ([`serve`]): één verzoek per aanroep, met [`Exchange`] als de
+//!   ene plek waar een handler het verzoek leest en het antwoord schrijft;
+//!   mag de verbinding blijven, dan komt ze terug als [`Kept`], zonder
+//!   buffers, en bepaalt de aanroeper waar ze wacht;
 //! - de [`Mux`]: methode plus pad, exact of subtree, `{segment}` en
 //!   `{rest...}`, `GET` dat ook `HEAD` bedient, 404 en 405 met `Allow`;
 //! - de client ([`send`] voor één hop op een gegeven verbinding, [`fetch`] en
@@ -74,7 +76,7 @@ pub use header::Header;
 pub use io::{AsyncRead, AsyncWrite, Close, Conn, IoError, close, flush, read, write_all};
 pub use mux::{Found, Mux};
 pub use pool::{Client, Pool};
-pub use server::{Exchange, Hijacked, Next, Outcome, Raw, Request, Source, serve};
+pub use server::{Exchange, Hijacked, Kept, Next, Outcome, Raw, Request, Source, serve};
 
 /// Leesbuffer per verbinding, en daarmee ook de grens van één headerregel.
 ///
@@ -117,9 +119,6 @@ pub(crate) const MAX_REDIRECTS: usize = 10;
 ///
 /// Een verbinding die niets zegt, houdt anders een taak uit de pool vast.
 pub(crate) const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
-
-/// Termijn tussen twee verzoeken op een keep-alive-verbinding.
-pub(crate) const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Termijn per schrijfactie op de socket, niet per antwoord: een lange stroom
 /// overleeft, een client die niet leest niet.

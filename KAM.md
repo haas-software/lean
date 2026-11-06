@@ -66,7 +66,12 @@ actions out. Nothing in lean runs by itself.
 
 For `leanhttp`, "multiple things over one channel" means **sequential
 requests and responses over a keep-alive connection**; speculative HTTP
-pipelining is not contractual, and that crate multiplexes nothing.
+pipelining is not contractual, and that crate multiplexes nothing. The
+server serves one request per call and hands a keep-alive connection back
+(`Kept`): where an idle connection waits, and for how long, belongs to the
+caller, so a worker belongs to a request and never to an idle connection
+(06-11-2026: 16 workers that each held their keep-alive connection were
+stopped by 16 idle connections).
 Concurrent streams exist in exactly one place, `leanh2`, because one measured
 consumer's peer opens them — not as a general capability of this stack. A
 caller that has a choice uses `leanhttp`.
@@ -78,8 +83,8 @@ caller that has a choice uses `leanhttp`.
 | leannet | Ethernet; IPv4 ARP/ICMP/UDP/TCP with congestion control (slow start, congestion avoidance, fast retransmit) and link-local multicast; opt-in IPv6 UDP, ICMPv6/NDP, link-scoped multicast, one active SLAAC identity, and expiring PIO/RIO routing; a keyed ISS and random ephemeral ports; one deadline per dial; `abort_peer`; bounded memory | one IPv4 identity; one derived link-local plus one active SLAAC IPv6 identity; bounded simplified NDP and route state; fixed 1280-byte IPv6 packet ceiling; the TCP times under "Deviations from the RFC" | TCPv6, DHCPv6, extension headers, fragmentation, PMTUD, MLD/IGMP, wider multicast, dual-family sockets, per-handle I/O deadlines, connected UDP, full NUD and multi-address renumbering, timestamps, Nagle, SYN cookies, data-path logging |
 | leandhcp | DORA over raw frames before the stack; renew and rebind per RFC 2131 §4.4.5; the lease counted from the REQUEST; `Moved`, `Refused` and `Expired` are final | fixed 3-second rounds instead of the §4.1 backoff with jitter | DHCPv6, INFORM, DECLINE, RELEASE, options beyond the lease, mask, router, DNS and server |
 | leantls | TLS 1.3 client and server, `TLS_AES_128_GCM_SHA256`, X25519 and P-256, a pinned Ed25519 peer or a chain (`ChainVerifier`, Mozilla roots behind `mozilla-roots`); client ALPN on request; client certificates (`ClientIdentity`, `RsaIdentity` with RSA-PSS); an empty Certificate when the server asks and the client has none | TLS 1.2 behind the feature `tls12` and only with `Versions::Tls13OrTls12`: ECDHE with AES-128-GCM, EMS required, the downgrade sentinel enforced, chain trust only, no ALPN | other suites and groups, HelloRetryRequest, resumption, PSK, 0-RTT, renegotiation, post-handshake authentication, compression, CBC, RSA key exchange, silent skip-verify |
-| HTTP server | HTTP/1.1, sequential keep-alive, fixed and streamed responses, `HEAD`, `204`/`205`/`304`, `claim_done`, `reader_gone`, `stream`, `hijack` | origin-form only, request bodies with `Content-Length` or exactly `Transfer-Encoding: chunked`, WebSocket through raw takeover | HTTP/1.0, HTTP/2 in this crate (it lives in `leanh2`), CONNECT, chunk extensions and trailer semantics in requests, server-side Expect state machine, general 1xx state machine |
-| Mux | method+path, exact/subtree, `{segment}`, `{rest...}`, `GET`→`HEAD`, `404`/`405`+`Allow` | canonical paths or rejection; registration fails with `Err` | host routing, `{$}`, escaped/dot routing, slash normalization |
+| HTTP server | HTTP/1.1, one request per `serve` call with the connection handed back for keep-alive (`Kept`, without buffers, with any pipelined bytes), fixed and streamed responses, `HEAD`, `204`/`205`/`304`, `claim_done`, `reader_gone`, `stream`, `hijack` | origin-form only, request bodies with `Content-Length` or exactly `Transfer-Encoding: chunked`, WebSocket through raw takeover | HTTP/1.0, HTTP/2 in this crate (it lives in `leanh2`), CONNECT, chunk extensions and trailer semantics in requests, server-side Expect state machine, general 1xx state machine |
+| Mux | method+path, exact/subtree, `{segment}`, `{rest...}`, `{$}` (exactly the root with slash, last segment only), `GET`→`HEAD`, `404`/`405`+`Allow` | canonical paths or rejection; registration fails with `Err` | host routing, escaped/dot routing, slash normalization |
 | HTTP client | outbound HTTP/1.1, inbound 1.0/1.1, GET/HEAD redirects, response framing, header deadline, keep-alive pool keyed by scheme, host and port | fixed-length streaming upload with a strict Expect decision; compression pass-through | request chunking, automatic decompression, CONNECT/upgrade, general retry state machine |
 | leanhttps | TLS as a dialer composition (`TlsDial`, `WebDial`); SNI per connection; client certificate and fixed TLS name passed through | TLS 1.2 only through `TlsDial::with_tls12` (feature `tls12`); `WebDial` stays TLS 1.3 | a server side, any HTTP or TLS protocol of its own |
 | S3 | SigV4 and the used object operations (GET, GET to a sink, PUT, PUT from a source, HEAD, conditional PUT/DELETE, paginated LIST); one attempt per request in `leans3http` | signed calls never follow redirects; a streamed upload under a progress deadline | multipart, streaming SigV4, SigV4a, presigned URLs, IMDS/IAM, any retry inside lean |
@@ -398,8 +403,10 @@ The server MUST:
 - limit each header line to 8 KiB (`BUF_SIZE`) and all request headers to
   64 KiB;
 - require exactly one non-empty `Host` and accept only origin-form targets;
-- process requests sequentially per connection while both sides permit
-  keep-alive;
+- serve one request per call; when both sides permit keep-alive and the
+  body was drained, return the connection as `Outcome::Kept`, without its
+  buffers and without a read deadline, carrying any bytes the client already
+  sent for the next request; `Kept::serve` continues with those bytes;
 - accept a request body with exactly one valid `Content-Length`, or with
   exactly `Transfer-Encoding: chunked` (no chunk extensions; trailers are
   checked and discarded), decoded up to 1 MiB (`MAX_BODY_BYTES`); a short body
@@ -412,15 +419,19 @@ The server MUST:
   to chunked framing;
 - send no body bytes for `HEAD`, `204`, `205`, or `304`, and frame `205`
   explicitly with `Content-Length: 0`;
+- merge case variants of one response header name when their values are
+  equal, and drop them all and close when they differ, except `Set-Cookie`:
+  every cookie stays its own line (RFC 9110 §5.3, RFC 6265 §3; until
+  06-11-2026 a second, different cookie was dropped with the first);
 - refuse an invalid response header name or value with an error to the
   handler before anything reaches the wire (the client then gets a `500`),
   never drop it silently;
 - answer a handler error with a `500` when nothing was sent yet;
 - support handler statuses `200`–`599`; redirects and error statuses remain
   the web server's decision;
-- apply the documented deadlines (`REQUEST_TIMEOUT`, `IDLE_TIMEOUT`,
-  `BODY_TIMEOUT`, `WRITE_TIMEOUT`, `DRAIN_TIMEOUT`) to request parsing,
-  request-body reads, and response writes.
+- apply the documented deadlines (`REQUEST_TIMEOUT`, `BODY_TIMEOUT`,
+  `WRITE_TIMEOUT`, `DRAIN_TIMEOUT`) to request parsing, request-body reads,
+  and response writes; the wait between two requests is the caller's.
 
 `flush` is the streaming-response seam. Without a known length, the writer
 chooses chunked framing. `hijack` is the protocol-takeover seam: the hijacker
@@ -485,8 +496,11 @@ The server explicitly rejects:
 `hijack`. `205` remains its own final status, is always bodyless, and
 receives `Content-Length: 0`.
 
-The Mux has no host routing, `{$}`, escaped routing, path cleaning, or
-automatic slash redirects.
+The Mux has no host routing, escaped routing, path cleaning, or automatic
+slash redirects. `{$}` (06-11-2026) is carried as the last segment only:
+`GET /{$}` is exactly `/`, `/docs/{$}` exactly `/docs/`; four consumers kept a
+hand-written root check or their own layer without it (welcome, vitals,
+Meet, haasbase).
 
 ### Change rule, filled in: a reader that leaves
 

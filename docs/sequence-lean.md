@@ -999,10 +999,16 @@ rond de future".
 
 1. **`serve`:** de lees- en schrijfbuffer faalbaar alloceren. Lukt dat niet,
    dan sluiten.
-2. **Per verzoek een termijn:** 15 s voor het eerste, 60 s voor de volgende
-   (`REQUEST_TIMEOUT`, `IDLE_TIMEOUT`).
+2. **Eén verzoek per aanroep** (06-11-2026): 15 s voor de kop
+   (`REQUEST_TIMEOUT`). Mag de verbinding blijven, dan komt ze terug als
+   `Outcome::Kept`, zonder buffers en zonder leestermijn, met de bytes die
+   de client al vooruit stuurde; `Kept::serve` gaat daarmee verder.
+   `IDLE_TIMEOUT` en de lus zijn weg: waar een stille verbinding wacht, is
+   van de aanroeper.
    - **Waarom:** "Een verbinding die niets zegt, houdt anders een taak uit
-     de pool vast".
+     de pool vast". Gemeten op 06-11: met 16 werkers die elk hun
+     keep-alive-verbinding vasthielden, legden 16 stille verbindingen de
+     server stil.
 3. **`read_request`:**
    - één lege leidende CRLF mag (RFC 9112 §2.2);
    - de requestregel strikt: alleen HTTP/1.1, origin-form, een kanoniek

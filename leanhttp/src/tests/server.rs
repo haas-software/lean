@@ -281,7 +281,7 @@ fn serve_hijack_geeft_de_verbinding_terug() {
         .unwrap();
         match out {
             Outcome::Hijacked(h) => assert_eq!(h.buffered, b"rest"),
-            Outcome::Closed => panic!("verbinding niet teruggegeven"),
+            Outcome::Closed | Outcome::Kept(_) => panic!("verbinding niet teruggegeven"),
         }
     });
 }
@@ -1557,4 +1557,101 @@ fn stream_stopt_zodra_de_lezer_weggaat() {
     // Een vertrokken lezer is geen fout, en de bron is niet leeggepompt.
     assert!(ok);
     assert!(sent < 100, "{sent} stukken naar een lezer die weg was");
+}
+
+/// Eén verzoek per aanroep: een keep-alive-antwoord geeft de verbinding
+/// terug, zonder `Connection: close`, en de aanroeper bedient het volgende.
+#[test]
+fn serve_geeft_de_verbinding_terug_voor_het_volgende_verzoek() {
+    block_on(async {
+        let (mut c, s) = pipe();
+        let h = async |ex: &mut crate::Exchange<'_, End>| -> Result {
+            let path = ex.req.path.clone();
+            ex.write(path.as_bytes()).await?;
+            Ok(())
+        };
+        write_all(&mut c, b"GET /een HTTP/1.1\r\nHost: x\r\n\r\n")
+            .await
+            .unwrap();
+        let Outcome::Kept(k) = serve(s, &h).await.unwrap() else {
+            panic!("keep-alive mag: de verbinding hoort terug te komen")
+        };
+        assert!(!k.has_buffered());
+        write_all(
+            &mut c,
+            b"GET /twee HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        )
+        .await
+        .unwrap();
+        assert!(matches!(k.serve(&h).await.unwrap(), Outcome::Closed));
+        let all = String::from_utf8(read_all(&mut c).await).unwrap();
+        let (first, second) = all.split_once("/een").unwrap();
+        assert!(
+            !first.to_ascii_lowercase().contains("connection: close"),
+            "{all}"
+        );
+        assert!(second.contains("Connection: close"), "{all}");
+        assert!(second.ends_with("/twee"), "{all}");
+    });
+}
+
+/// Pijplijnen: wat de client vooruit stuurde, reist mee in `Kept`, zodat de
+/// aanroeper niet op een leesbare verbinding wacht die het nooit meer wordt.
+#[test]
+fn kept_draagt_gepijplijnde_bytes_mee() {
+    block_on(async {
+        let (mut c, s) = pipe();
+        let h = async |ex: &mut crate::Exchange<'_, End>| -> Result {
+            let path = ex.req.path.clone();
+            ex.write(path.as_bytes()).await?;
+            Ok(())
+        };
+        write_all(
+            &mut c,
+            b"GET /a HTTP/1.1\r\nHost: x\r\n\r\nGET /b HTTP/1.1\r\nHost: x\r\n\r\n",
+        )
+        .await
+        .unwrap();
+        let Outcome::Kept(k) = serve(s, &h).await.unwrap() else {
+            panic!("de eerste mag blijven")
+        };
+        assert!(k.has_buffered());
+        let Outcome::Kept(k) = k.serve(&h).await.unwrap() else {
+            panic!("de tweede ook")
+        };
+        assert!(!k.has_buffered());
+        k.close().await;
+        let all = String::from_utf8(read_all(&mut c).await).unwrap();
+        assert!(
+            all.contains("\r\n\r\n/a") && all.ends_with("\r\n\r\n/b"),
+            "{all}"
+        );
+    });
+}
+
+/// Twee koekjes zijn twee regels: `Set-Cookie` wordt nooit samengevoegd of
+/// geschrapt, en de verbinding blijft (RFC 9110 §5.3, RFC 6265 §3).
+#[test]
+fn set_cookie_blijft_per_regel() {
+    let srv = h!(ex => {
+        ex.header_mut().append("Set-Cookie", "sid=abc; Path=/; HttpOnly")?;
+        ex.header_mut().append("Set-Cookie", "theme=dark; Path=/; Expires=Mon, 02 Jan 2027 15:04:05 GMT")?;
+        ex.write(b"ok").await?;
+    });
+    let got = rt(
+        &srv,
+        "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+    );
+    let (head, body) = split(&got);
+    assert_eq!(body, "ok");
+    assert!(
+        head.contains("\r\nSet-Cookie: sid=abc; Path=/; HttpOnly\r\n"),
+        "{head}"
+    );
+    assert!(
+        head.contains(
+            "\r\nSet-Cookie: theme=dark; Path=/; Expires=Mon, 02 Jan 2027 15:04:05 GMT\r\n"
+        ),
+        "{head}"
+    );
 }

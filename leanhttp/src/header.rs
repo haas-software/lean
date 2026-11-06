@@ -111,6 +111,11 @@ impl Header {
     /// Voegt hoofdletter-varianten van één naam samen voor de draad: gelijke
     /// waarden worden één regel, verschillende verdwijnen allemaal.
     ///
+    /// `Set-Cookie` is de uitzondering (RFC 9110 §5.3, RFC 6265 §3): elk
+    /// koekje is een eigen regel en wordt nooit samengevoegd of geschrapt.
+    /// Tot 06-11-2026 viel een tweede, ander koekje weg met het eerste, en
+    /// hijackte Spin daarom elk API-antwoord.
+    ///
     /// Geeft `true` als er een conflict was; de schrijver sluit dan de
     /// verbinding, zodat EOF de enige ondubbelzinnige framing is.
     pub(crate) fn collapse_variants(&mut self) -> bool {
@@ -118,7 +123,9 @@ impl Header {
         let mut i = 0;
         while i < self.fields.len() {
             let (mut dup, mut differs) = (false, false);
-            if let Some((name, value)) = self.fields.get(i) {
+            if let Some((name, value)) = self.fields.get(i)
+                && !name.eq_ignore_ascii_case("Set-Cookie")
+            {
                 for (k, v) in self.fields.iter().skip(i + 1) {
                     if k.eq_ignore_ascii_case(name) {
                         dup = true;

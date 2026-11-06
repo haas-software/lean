@@ -203,6 +203,27 @@ impl ReadBuf {
         Self::with_line_max(BUF_SIZE)
     }
 
+    /// Als [`ReadBuf::new`], met `unread` al in de buffer: de bytes die een
+    /// vorig verzoek vooruit las ([`crate::Kept`]).
+    pub(crate) fn with_unread(unread: Vec<u8>) -> Result<Self> {
+        let mut r = Self::new()?;
+        if !unread.is_empty() {
+            if unread.len() > r.buf.len() {
+                r.buf
+                    .try_reserve_exact(unread.len() - r.buf.len())
+                    .map_err(|_| Error::Alloc {
+                        bytes: unread.len(),
+                    })?;
+                r.buf.resize(unread.len(), 0);
+            }
+            if let Some(dst) = r.buf.get_mut(..unread.len()) {
+                dst.copy_from_slice(&unread);
+            }
+            r.end = unread.len();
+        }
+        Ok(r)
+    }
+
     /// Als [`ReadBuf::new`], met een regel tot `line_max` bytes.
     pub(crate) fn with_line_max(line_max: usize) -> Result<Self> {
         let mut buf = Vec::new();

@@ -7,10 +7,16 @@
 //! "/logs/"                        een subtree: de wortel met slash en alles eronder
 //! "/v1/agents/{id}/logs/"         {id} vangt één segment
 //! "GET /app-ui/{app}/{path...}"   {path...} vangt de rest van het pad
+//! "GET /{$}"                      precies "/", niet wat eronder hangt
+//! "GET /docs/{$}"                 precies "/docs/" (met slash), niets eronder
 //! ```
 //!
-//! Bewust weggelaten: `{$}` (vaste paden en subtrees dekken de tabellen), en
-//! routering op escapes (de parser weigert escapes die tot `/`, `.` of `..`
+//! `{$}` kwam terug op 06-11-2026: welcome, vitals en Meet hielden een
+//! handgeschreven `path == "/"` naast hun tabel, en haasbase een eigen laag
+//! boven de Mux, omdat `/` anders een subtree is die alles vangt. Het staat
+//! alleen als laatste segment.
+//!
+//! Bewust weggelaten: routering op escapes (de parser weigert escapes die tot `/`, `.` of `..`
 //! decoderen, zodat middleware en de Mux hetzelfde pad zien). Geen scores en
 //! geen sortering: de strikte-deelverzamelingsrelatie kiest de specifiekste
 //! route, los van de volgorde van registreren.
@@ -46,6 +52,8 @@ struct Route<T> {
     rest: Option<String>,
     /// Het patroon eindigde op `/`: de wortel met slash en alles eronder.
     subtree: bool,
+    /// Het patroon eindigde op `{$}`: precies de wortel met slash.
+    exact: bool,
     value: T,
 }
 
@@ -112,10 +120,15 @@ impl<T> Mux<T> {
             segs: Vec::new(),
             rest: None,
             subtree: path.ends_with('/'),
+            exact: false,
             value,
         };
         for seg in path.trim_matches('/').split('/') {
             rt.push_segment(seg)?;
+        }
+        if rt.exact && path.ends_with('/') {
+            // `/a/{$}/`: na `{$}` hoort niets, ook geen slash.
+            return Err(PatternError::Dollar.into());
         }
         // Overlap mag alleen als de een een strikte deelverzameling van de
         // ander is; anders zou de volgorde van registreren beslissen.
@@ -210,12 +223,18 @@ impl<T> Route<T> {
         if self.rest.is_some() {
             return Err(PatternError::SegmentAfterRest.into());
         }
+        // Na `{$}` hoort niets meer.
+        if self.exact {
+            return Err(PatternError::Dollar.into());
+        }
         if seg.is_empty() {
             // Het wortelpatroon "/" heeft geen segmenten.
             return Ok(());
         }
         if seg == "{$}" {
-            return Err(PatternError::Dollar.into());
+            self.exact = true;
+            self.subtree = false;
+            return Ok(());
         }
         if let Some(name) = wild(seg).and_then(|s| s.strip_suffix("...")) {
             if name.is_empty() || self.has_name(name) {
@@ -281,11 +300,26 @@ impl<T> Route<T> {
             return false;
         }
         let (r, n) = (self.segs.len(), o.segs.len());
-        match (self.subtree, o.subtree) {
-            (true, true) => true,
-            (true, false) => n > r,
-            (false, true) => r > n,
-            (false, false) => r == n,
+        match (self.kind(), o.kind()) {
+            (Kind::Subtree, Kind::Subtree) => true,
+            (Kind::Subtree, Kind::Fixed) => n > r,
+            (Kind::Fixed, Kind::Subtree) => r > n,
+            (Kind::Subtree, Kind::Exact) => n >= r,
+            (Kind::Exact, Kind::Subtree) => r >= n,
+            (Kind::Fixed, Kind::Fixed) | (Kind::Exact, Kind::Exact) => r == n,
+            // Een vast pad mist de slash die een exact pad eist.
+            (Kind::Fixed, Kind::Exact) | (Kind::Exact, Kind::Fixed) => false,
+        }
+    }
+
+    /// Welke paden de vorm dekt, los van de segmenten.
+    fn kind(&self) -> Kind {
+        if self.subtree {
+            Kind::Subtree
+        } else if self.exact {
+            Kind::Exact
+        } else {
+            Kind::Fixed
         }
     }
 
@@ -300,11 +334,14 @@ impl<T> Route<T> {
             }
         }
         let (r, n) = (self.segs.len(), o.segs.len());
-        if o.subtree {
-            // Vaste paden missen de slash: alleen strikt eronder.
-            return if self.subtree { r >= n } else { r > n };
+        match (self.kind(), o.kind()) {
+            // Een subtree dekt zijn wortel met slash en alles eronder; een vast
+            // pad mist die slash, dus alleen strikt eronder.
+            (Kind::Subtree | Kind::Exact, Kind::Subtree) => r >= n,
+            (Kind::Fixed, Kind::Subtree) => r > n,
+            (Kind::Fixed, Kind::Fixed) | (Kind::Exact, Kind::Exact) => r == n,
+            _ => false,
         }
-        !self.subtree && r == n
     }
 
     /// Zegt of `self` een strikte deelverzameling van `o` is.
@@ -316,12 +353,13 @@ impl<T> Route<T> {
 
     fn matches(&self, segs: &[&str], trailing: bool) -> bool {
         let n = self.segs.len();
-        if self.subtree {
+        let fits = match self.kind() {
             // Afstammelingen altijd; de wortel zelf vraagt de slash.
-            if segs.len() < n || (segs.len() == n && !trailing) {
-                return false;
-            }
-        } else if segs.len() != n || trailing {
+            Kind::Subtree => segs.len() > n || (segs.len() == n && trailing),
+            Kind::Exact => segs.len() == n && trailing,
+            Kind::Fixed => segs.len() == n && !trailing,
+        };
+        if !fits {
             return false;
         }
         self.segs
@@ -358,6 +396,17 @@ impl<T> Route<T> {
         }
         Ok(vals)
     }
+}
+
+/// Welke paden een patroon dekt, naast zijn segmenten.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    /// Precies de segmenten, zonder slash aan het eind.
+    Fixed,
+    /// Precies de segmenten, met slash aan het eind (`{$}`).
+    Exact,
+    /// De segmenten met slash, en alles eronder.
+    Subtree,
 }
 
 /// De naam binnen `{...}`, als het segment zo geschreven is.

@@ -175,7 +175,7 @@ pub enum PatternError {
     NotCanonical,
     /// De methode was geen token.
     BadMethod,
-    /// `{$}` bestaat hier niet.
+    /// `{$}` staat alleen als laatste segment, achter een slash.
     Dollar,
     /// Een lege of dubbele wildcardnaam.
     BadName,
@@ -312,8 +312,8 @@ impl fmt::Display for PatternError {
             }
             PatternError::BadMethod => f.write_str("malformed method token"),
             PatternError::Dollar => f.write_str(
-                "{$} is not carried: use a fixed path (no trailing slash) \
-                 or a subtree (trailing slash)",
+                "{$} must be the last segment, after a slash (\"GET /{$}\", \
+                 \"/docs/{$}\")",
             ),
             PatternError::BadName => f.write_str("empty or duplicate wildcard name"),
             PatternError::SegmentAfterRest => f.write_str("segments after {rest...}"),

@@ -358,7 +358,12 @@ where
     Rc::new(move |conn: End| {
         let h = h.clone();
         spawn(async move {
-            let _ = serve(conn, &*h).await;
+            // De keep-alive-lus die een app zelf heeft: zolang de
+            // verbinding mag blijven, het volgende verzoek.
+            let mut out = serve(conn, &*h).await;
+            while let Ok(crate::Outcome::Kept(k)) = out {
+                out = k.serve(&*h).await;
+            }
         });
     })
 }

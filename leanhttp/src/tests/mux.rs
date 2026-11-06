@@ -173,9 +173,64 @@ fn mux_over_de_draad() {
     assert_eq!(split(&got).1, "device lamp-9");
 }
 
+/// `{$}` (06-11-2026): precies de wortel met slash, naast een subtree en
+/// vaste paden, en de specifiekste wint los van de volgorde.
 #[test]
-fn mux_dollar_panickt_met_alternatief() {
-    let err = Mux::new().handle("GET /logs/{$}", ()).unwrap_err();
+fn mux_dollar_is_precies_de_wortel() {
+    for order in [false, true] {
+        let mut patterns = vec![
+            "GET /{$}",
+            "/",
+            "/health",
+            "GET /docs/{$}",
+            "/docs/",
+            "GET /docs/{page}",
+        ];
+        if order {
+            patterns.reverse();
+        }
+        let mut m = Mux::new();
+        for p in &patterns {
+            m.handle(p, *p).unwrap();
+        }
+        for (method, path, want) in [
+            ("GET", "/", "GET /{$}"),
+            ("HEAD", "/", "GET /{$}"),
+            ("POST", "/", "/"),
+            ("GET", "/x", "/"),
+            ("GET", "/health", "/health"),
+            ("GET", "/docs/", "GET /docs/{$}"),
+            ("GET", "/docs/a", "GET /docs/{page}"),
+            ("GET", "/docs/a/b", "/docs/"),
+            ("POST", "/docs/", "/docs/"),
+        ] {
+            let (f, _) = find(&m, method, path);
+            assert_eq!(
+                f,
+                Found::Route(&want),
+                "{method} {path} (omgekeerd: {order})"
+            );
+        }
+    }
+    // Zonder vangnet: alleen `/` zelf; de rest is 404, een andere methode 405.
+    let mut m = Mux::new();
+    m.handle("GET /{$}", "home").unwrap();
+    assert_eq!(find(&m, "GET", "/").0, Found::Route(&"home"));
+    assert_eq!(find(&m, "GET", "/x").0, Found::NotFound);
+    assert_eq!(
+        find(&m, "POST", "/").0,
+        Found::MethodNotAllowed("GET, HEAD".to_string())
+    );
+    // Twee keer dezelfde exacte route is een conflict; een vast pad ernaast niet.
+    let mut m = Mux::new();
+    m.handle("/a/{$}", ()).unwrap();
+    m.handle("/a", ()).unwrap();
+    assert!(matches!(
+        m.handle("/a/{$}", ()),
+        Err(Error::Pattern(PatternError::Conflict { .. }))
+    ));
+    // Na `{$}` hoort niets, ook geen slash.
+    let err = Mux::new().handle("GET /logs/{$}/", ()).unwrap_err();
     assert_eq!(err, Error::Pattern(PatternError::Dollar));
     assert!(err.to_string().contains("{$}"), "{err}");
 }
