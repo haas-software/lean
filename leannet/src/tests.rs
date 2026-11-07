@@ -499,7 +499,8 @@ fn stack_garbage_never_panics() {
 
 #[test]
 fn stack_listener_backlog_overflow() {
-    let mut net = Net::pair(1 << 20, 1 << 20);
+    // Ruim genoeg voor de backlog plus de overloop (elk een vloerring).
+    let mut net = Net::pair(4 << 20, 4 << 20);
     let l = net.b().tcp_listen(88).unwrap();
     let dials = TCP_BACKLOG + 4;
     let mut reset = 0;

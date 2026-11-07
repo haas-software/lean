@@ -25,7 +25,7 @@ use crate::wire::{
     self, BCAST_IP, BCAST_MAC, ETHERTYPE_ARP, ETHERTYPE_IPV4, MIN_FRAME, PROTO_ICMP, PROTO_TCP,
     PROTO_UDP, SIZE_ETH, SIZE_IPV4, SIZE_TCP, TcpFlags, TcpHeader,
 };
-use crate::{ArpStats, Error, Result, SEC};
+use crate::{ArpStats, Error, MS, Result, SEC};
 
 /// De klassieke Ethernet-MTU.
 pub(crate) const MTU: usize = 1500;
@@ -57,7 +57,15 @@ pub(crate) const TCP_FLOOR_RING: usize = TCP_FLOOR_RX + TCP_FLOOR_TX;
 
 /// Voltooide handshakes die op `accept` wachten. Overloop krijgt een RST in
 /// plaats van een onzichtbare verbindingsplek.
-pub(crate) const TCP_BACKLOG: usize = 8;
+///
+/// 64, niet 8: een plek is alleen een handvat (de vloerbuffers liggen er
+/// tijdens de handshake al), en 8 liep vol zodra er in één ronde van de
+/// pomp meer handshakes afrondden dan de acceptor toen kon aannemen. De
+/// client zag dan "verbonden" en een RST op zijn eerste verzoek, de app zag
+/// niets (06-11-2026, M4: ~50 van 144 verbindingen bij een burst van 96
+/// connects). Een browser opent er zes tegelijk, een CDN na een herstart
+/// tientallen. Linux begint bij 4096 (`somaxconn`).
+pub(crate) const TCP_BACKLOG: usize = 64;
 /// Een voltooide handshake heeft geen applicatie-eigenaar tot `accept` hem
 /// teruggeeft. Die overdracht is begrensd los van peerverkeer, zodat een
 /// vergeten listener de tupels en vloerbuffers niet eeuwig vasthoudt.
@@ -261,6 +269,8 @@ pub struct Stack {
     pub(crate) arp: ArpTable,
     pub(crate) pot: Budget,
     pub(crate) conns: Vec<Option<Conn>>,
+    /// Vanaf wanneer [`Stack::maintain`] de routes weer naloopt.
+    routes_due: u64,
     pub(crate) listeners: Vec<Option<Listener>>,
     pub(crate) udp: UdpTable,
     #[cfg(feature = "ipv6")]
@@ -393,6 +403,7 @@ impl Stack {
             arp: ArpTable::new(cfg.ip, cfg.mac)?,
             pot: Budget::new(cfg.budget),
             conns: Vec::new(),
+            routes_due: 0,
             listeners: Vec::new(),
             udp: UdpTable::new(),
             #[cfg(feature = "ipv6")]
@@ -1224,13 +1235,26 @@ impl Stack {
     /// lui: een ontbrekende MAC kost geen volgnummertoestand zolang ARP loopt.
     fn drain_tcp(&mut self, now: u64, frame: &mut [u8]) -> Option<usize> {
         let payload_at = SIZE_ETH + SIZE_IPV4 + SIZE_TCP;
+        // Binnen één aanroep geeft hetzelfde adres op hetzelfde `now`
+        // dezelfde route; veel verbindingen delen een adres (een proxy, een
+        // CDN-edge, een loadgenerator). Zonder dit kostte elk verzonden frame
+        // een opzoeking per verbinding (06-11-2026, M4).
+        let mut last: Option<([u8; 4], Option<[u8; 6]>)> = None;
         for i in 0..self.conns.len() {
             loop {
                 let Some(c) = self.conn(i).filter(|c| c.live) else {
                     break;
                 };
                 let key = c.key;
-                let Some(mac) = self.route(key.rip, now, true) else {
+                let mac = match last {
+                    Some((ip, mac)) if ip == key.rip => mac,
+                    _ => {
+                        let mac = self.route(key.rip, now, true);
+                        last = Some((key.rip, mac));
+                        mac
+                    }
+                };
+                let Some(mac) = mac else {
                     break;
                 };
                 let Some(c) = self.conns.get_mut(i).and_then(Option::as_mut) else {
@@ -1263,6 +1287,15 @@ impl Stack {
                 c.write_waker.wake();
             }
         }
+        // De routecontrole hieronder kost een opzoeking per verbinding, en
+        // `poll_transmit` roept dit per frame aan: werk dat meegroeide met het
+        // aantal verbindingen (06-11-2026, M4: één app zakte van 154k naar
+        // 134k req/s bij 48 tegen 96 verbindingen). Een weggevallen route
+        // hoeft niet binnen een milliseconde gezien te worden; opruimen wel.
+        let routes = now >= self.routes_due;
+        if routes {
+            self.routes_due = now.saturating_add(MS);
+        }
         for i in 0..self.conns.len() {
             let Some(c) = self.conn(i).filter(|c| c.live) else {
                 continue;
@@ -1273,6 +1306,9 @@ impl Stack {
                 || c.tcp.lifecycle_expired(now);
             if c.tcp.state == TcpState::Closed || expired {
                 self.abort_and_reap(i);
+                continue;
+            }
+            if !routes {
                 continue;
             }
             let rip = c.key.rip;
