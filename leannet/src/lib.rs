@@ -6,7 +6,7 @@
 //! onder TLS), namen en tijd ophalen (UDP voor DNS en SNTP) en link-local
 //! multicast voor mDNS. Al het andere is bewust afwezig, niet onaf; de grenzen
 //! staan in `KAM.md` (de leannet-sectie) en het waarom in `leannet/DESIGN.md`
-//! van de Go-generatie (tag v1.2.0 van github.com/xinix00/lean).
+//! van de Go-generatie (tag v1.2.0 van github.com/haas-software/lean).
 //!
 //! # Eén eigenaar, geen I/O
 //!
