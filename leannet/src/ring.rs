@@ -253,21 +253,57 @@ impl TxRing {
 /// geheugen gebruik volgt en geen configuratie. De vorige stack reserveerde
 /// 2 MiB per listener en 256 KiB per dial; op een 64 MiB-node gaf dat
 /// reproduceerbaar een OOM na 151 seconden downloadlast (DESIGN.md).
+///
+/// **Druk** (`pressure`), zoals Linux `tcp_mem`: aan zodra `used` boven
+/// `high` komt, uit zodra hij onder `low` zakt. Onder druk groeit geen ring
+/// en geeft de pomp elke lege ring terug tot zijn vloer. De hysterese houdt
+/// een pot op de rand uit een cyclus van krimpen en groeien.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct Budget {
     pub(crate) total: usize,
     pub(crate) used: usize,
+    /// Druk aan boven deze `used`.
+    pub(crate) high: usize,
+    /// Druk af onder deze `used`.
+    pub(crate) low: usize,
+    pub(crate) pressure: bool,
+    /// Hoe vaak de druk aanging.
+    pub(crate) pressure_entered: usize,
 }
 
 impl Budget {
-    /// Maakt een pot van `total` bytes.
+    /// Maakt een kale pot van `total` bytes, zonder druk zolang hij niet
+    /// overloopt (wat `reserve` weigert).
+    #[cfg(test)]
     pub(crate) fn new(total: usize) -> Budget {
-        Budget { total, used: 0 }
+        Budget::with_pressure(total, total, total)
+    }
+
+    /// Een pot met drukgrenzen, `low <= high <= total`.
+    pub(crate) fn with_pressure(total: usize, high: usize, low: usize) -> Budget {
+        Budget {
+            total,
+            used: 0,
+            high,
+            low,
+            pressure: false,
+            pressure_entered: 0,
+        }
     }
 
     /// Claimt `n` bytes als ze er zijn. Een aanroeper mag kleiner proberen of
     /// falen, maar wacht nooit stil op geheugen.
     pub(crate) fn reserve(&mut self, n: usize) -> bool {
+        let ok = self.reserve_peak(n);
+        self.track();
+        ok
+    }
+
+    /// Claimt de nieuwe buffer van een groei zonder de druk te herzien: de
+    /// piek (oud plus nieuw) duurt tot de aanroeper de oude teruggeeft, en
+    /// pas die `release` zegt of de druk aangaat. Anders zette elke groei
+    /// boven de helft van de pot de druk aan.
+    pub(crate) fn reserve_peak(&mut self, n: usize) -> bool {
         match self.used.checked_add(n) {
             Some(u) if u <= self.total => {
                 self.used = u;
@@ -281,12 +317,24 @@ impl Budget {
     /// budgetbelofte ongeldig maken; dat wordt geweigerd (`false`) en laat de
     /// pot ongemoeid.
     pub(crate) fn release(&mut self, n: usize) -> bool {
-        match self.used.checked_sub(n) {
+        let ok = match self.used.checked_sub(n) {
             Some(u) => {
                 self.used = u;
                 true
             }
             None => false,
+        };
+        self.track();
+        ok
+    }
+
+    /// Herziet de druk na elke wijziging: aan boven `high`, uit onder `low`.
+    fn track(&mut self) {
+        if !self.pressure && self.used > self.high {
+            self.pressure = true;
+            self.pressure_entered += 1;
+        } else if self.pressure && self.used < self.low {
+            self.pressure = false;
         }
     }
 

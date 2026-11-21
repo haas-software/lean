@@ -180,8 +180,14 @@ The transport core MUST:
 
 - keep all TCP rings and UDP queue reservations within `Config::budget`;
 - start each TCP connection with 16 KiB RX and 4 KiB TX, grow under measured
-  pressure, and return the whole budget on close or reap (grown capacity is
-  not shrunk while the connection lives);
+  pressure, and return the whole budget on close or reap;
+- give the pot back by itself, like Linux `tcp_mem`: above two thirds used
+  the pot is under pressure, no ring grows and the pump shrinks every empty
+  ring to its floor; below half the pressure lifts. A connection or SYN that
+  does not fit under pressure first shrinks every empty ring and retries
+  once. Without pressure grown capacity lives until close, so a bulk stream
+  keeps its rings. A flood may refuse everything for a while; once it stops
+  and the rings drain, the pot recovers without a restart or watchdog;
 - account SYN, data, and FIN in one sequence space and retransmit after loss
   (go-back-N);
 - validate cumulative ACKs against bytes actually sent, including during a
@@ -249,6 +255,7 @@ silent wait. They are policy for these nodes, not general Internet defaults.
 | TIME-WAIT | 2MSL, four minutes (RFC 9293 §3.6.1) | 1 s | Memory: a connection in TIME-WAIT holds its slot, its floor buffers and its tuple. The warm flip of HopOS does not wait minutes. The keyed, clock-driven ISS (RFC 6528) protects a new tuple against old segments. |
 | SYN-ACK ladder | at least three minutes (RFC 9293 §3.8.3, SHOULD) | 6 transmissions, gives up after 63 s | Linux `tcp_synack_retries=5`. An embryo holds a slot and floor buffers for a peer that proved nothing yet. Only the passive side; a dial's limit is the caller's deadline. |
 | FIN-WAIT-2 after a half close | no limit | 60 s | Linux `tcp_fin_timeout`. |
+| Window retraction | the receiver SHOULD NOT shrink the window (RFC 9293 §3.8.6.2.1) | under pot pressure an empty grown RX ring shrinks to its floor and one ACK advertises the smaller window | Linux `tcp_shrink_window` (6.5) allows the same under memory pressure; RFC 7323 §2.4 already expects it with window scaling. What the peer still sends into the old window partly fits and the rest is retransmitted. After one RTO of silence a sender restarts at its initial window (RFC 5681 §4.1), ten segments, which fits in the 16 KiB floor. |
 | Full close | — | 20 s absolute for data, FIN and TIME-WAIT together | An ownership bound: after the owner let go, a cooperative close is useful, holding the tuple and buffers forever is not. Traffic does not extend it. |
 | Accept handoff | — | 30 s absolute | Same: a completed handshake without an owner. |
 | ARP and NDP | at most one request per second (RFC 1122 §2.3.2.1) | 3 requests, 1 s apart, then 5 s negative | As Linux: an unresolved neighbour is asked `mcast_solicit` times (3 in `arp_tbl` and `nd_tbl`, `retrans_time` 1 s). The negative cache keeps a dead host from being asked in a loop. |

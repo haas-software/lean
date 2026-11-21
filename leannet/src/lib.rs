@@ -136,7 +136,18 @@
 //! luid (een fout of een RST), nooit met een stille wacht of een abort.
 //! Allocatie is overal faalbaar; na opbouw en groei alloceert het hete pad niet.
 //!
-//! [`Stack::pot`] leest de pot in O(1) (vrij, weigeringen);
+//! De pot geeft zichzelf terug, zoals Linux' `tcp_mem`. Boven twee derde
+//! bezet staat hij onder **druk**: geen ring groeit meer, en de pomp geeft in
+//! elke ronde elke lege ring terug tot zijn vloer. Onder de helft gaat de
+//! druk eraf. Een dial of SYN die niet past terwijl de pot onder druk staat,
+//! laat eerst alle lege ringen krimpen en probeert dan nog één keer. Een
+//! vloed mag zo even alles weigeren; zodra hij stopt en de ringen leeg zijn,
+//! komt de pot vanzelf terug, zonder herstart of waakhond (21-11-2026: een
+//! EasyFlor-instance verloor ruim 30 minuten elke uitgaande verbinding omdat
+//! gegroeide ringen van stille keep-alive-verbindingen de pot vasthielden).
+//! Zonder druk verandert er niets: een bulkstroom houdt zijn ringen.
+//!
+//! [`Stack::pot`] leest de pot in O(1) (vrij, druk, weigeringen);
 //! [`Stack::tcp_buffers`] geeft de ringmaten van één verbinding, met
 //! [`TcpBuffers::grown`] voor een pool die gegroeide verbindingen niet bewaart.
 //!

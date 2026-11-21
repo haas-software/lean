@@ -55,6 +55,17 @@ pub(crate) const TCP_FLOOR_TX: usize = 4 << 10;
 /// De minimale reservering per verbinding.
 pub(crate) const TCP_FLOOR_RING: usize = TCP_FLOOR_RX + TCP_FLOOR_TX;
 
+/// Boven twee derde bezet staat de pot onder druk, onder de helft gaat de
+/// druk eraf, zoals Linux' `tcp_mem`: druk aan boven `pressure`, af onder
+/// `min`, in de standaard 4 : 3 (hier 2/3 : 1/2, dezelfde verhouding).
+/// Onder druk groeit geen ring en geeft de pomp elke lege ring terug tot
+/// zijn vloer. De afstand tussen de twee houdt een pot op de rand uit een
+/// cyclus van krimpen en groeien. Geen knop: niemand heeft een andere
+/// waarde gemeten.
+pub(crate) fn pressure_marks(budget: usize) -> (usize, usize) {
+    (budget / 3 * 2, budget / 2)
+}
+
 /// Voltooide handshakes die op `accept` wachten. Overloop krijgt een RST in
 /// plaats van een onzichtbare verbindingsplek.
 ///
@@ -126,7 +137,8 @@ impl TcpBuffers {
     }
 }
 
-/// Een momentopname van de pot, in O(1): wat er vrij is en de weigeringen.
+/// Een momentopname van de pot, in O(1): wat er vrij is, de druk en de
+/// weigeringen.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PotStats {
     /// [`Config::budget`].
@@ -135,8 +147,15 @@ pub struct PotStats {
     pub used: usize,
     /// Vrije bytes.
     pub free: usize,
+    /// De pot staat nu onder druk: meer dan twee derde bezet, en nog niet
+    /// onder de helft terug.
+    pub pressure: bool,
+    /// Hoe vaak de druk aanging.
+    pub pressure_entered: usize,
     /// [`Stats::refused_no_budget`].
     pub refused_no_budget: usize,
+    /// [`Stats::tcp_shrunk`].
+    pub tcp_shrunk: usize,
 }
 
 /// Een momentopname van de tellers voor logging en telemetrie.
@@ -145,6 +164,8 @@ pub struct Stats {
     /// Inkomende verbindingen geweigerd (met een RST) omdat het budget op
     /// was. Een dial krijgt dan [`Error::NoBudget`].
     pub refused_no_budget: usize,
+    /// Ringen die onder druk terug naar hun vloer krompen.
+    pub tcp_shrunk: usize,
     /// Frames korter dan een Ethernet-header.
     pub drop_short_frame: usize,
     /// Datagrammen zonder gebonden poort of met een volle rij.
@@ -437,7 +458,10 @@ impl Stack {
             cfg,
             mtu,
             arp: ArpTable::new(cfg.ip, cfg.mac)?,
-            pot: Budget::new(cfg.budget),
+            pot: {
+                let (high, low) = pressure_marks(cfg.budget);
+                Budget::with_pressure(cfg.budget, high, low)
+            },
             conns: Vec::new(),
             routes_due: 0,
             listeners: Vec::new(),
@@ -498,14 +522,42 @@ impl Stack {
         self.pot.free()
     }
 
-    /// De pot: vrije bytes en de weigeringen. Goedkoop (geen rondgang langs
-    /// de verbindingen), dus ook per verzoek te lezen.
+    /// De pot: vrije bytes, druk en de weigeringen. Goedkoop (geen
+    /// rondgang langs de verbindingen), dus ook per verzoek te lezen.
     pub fn pot(&self) -> PotStats {
         PotStats {
             total: self.pot.total,
             used: self.pot.used,
             free: self.pot.free(),
+            pressure: self.pot.pressure,
+            pressure_entered: self.pot.pressure_entered,
             refused_no_budget: self.stats.refused_no_budget,
+            tcp_shrunk: self.stats.tcp_shrunk,
+        }
+    }
+
+    /// Geeft onder druk de lege ringen van verbinding `i` terug tot hun
+    /// vloer. Buiten druk doet hij niets: een bulkstroom zonder concurrentie
+    /// om de pot houdt zijn ringen.
+    pub(crate) fn shrink_conn(&mut self, i: usize) {
+        if !self.pot.pressure {
+            return;
+        }
+        if let Some(c) = self.conns.get_mut(i).and_then(Option::as_mut)
+            && c.live
+        {
+            self.stats.tcp_shrunk += c.tcp.shrink_empty(&mut self.pot);
+        }
+    }
+
+    /// Eén krimpronde over alle verbindingen; stopt vanzelf zodra de druk
+    /// eraf is.
+    fn shrink_all(&mut self) {
+        for i in 0..self.conns.len() {
+            if !self.pot.pressure {
+                return;
+            }
+            self.shrink_conn(i);
         }
     }
 
@@ -1066,8 +1118,18 @@ impl Stack {
     }
 
     /// Reserveert en maakt een verbinding op de vloermaten.
+    ///
+    /// Past de vloer niet terwijl de pot onder druk staat, dan krimpt eerst
+    /// elke lege ring en volgt één tweede poging: de ruimte die stille
+    /// verbindingen vasthielden, komt zo meteen bij wie haar nu vraagt, en
+    /// niet pas bij de volgende pompronde.
     pub(crate) fn new_conn(&mut self, key: ConnKey) -> Result<usize> {
-        if !self.pot.reserve(TCP_FLOOR_RING) {
+        let mut ok = self.pot.reserve(TCP_FLOOR_RING);
+        if !ok && self.pot.pressure {
+            self.shrink_all();
+            ok = self.pot.reserve(TCP_FLOOR_RING);
+        }
+        if !ok {
             return Err(Error::NoBudget {
                 need: TCP_FLOOR_RING,
                 free: self.pot.free(),
@@ -1355,10 +1417,13 @@ impl Stack {
                 self.abort_and_reap(i);
                 continue;
             }
+            // Onder druk gaat elke lege ring in deze ronde terug naar zijn
+            // vloer (Linux `tcp_mem`). Buiten druk kost dit één vergelijking.
+            let rip = c.key.rip;
+            self.shrink_conn(i);
             if !routes {
                 continue;
             }
-            let rip = c.key.rip;
             if self.route(rip, now, true).is_some() {
                 continue;
             }

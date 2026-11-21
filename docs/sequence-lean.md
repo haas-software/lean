@@ -528,12 +528,23 @@ Elke fout ruimt op (`abort_and_reap`, `release_handle`).
      een jumbo-link stuurt nooit een vol segment).
 
    Tellers: `tcp_rx_grown` en `tcp_rx_grow_refused`.
-4. **Gegroeide capaciteit blijft tot de close.** "Krimpen tussen reads of
-   ACKs zou één bulkstroom in een cyclus van groeien, alloceren en krimpen
-   veranderen" (`tcp.rs`, veld `budgeted`). KAM zegt het tegendeel (§12).
-   - **Waarom:** de pool van leanhttp sluit een gegroeide verbinding in
-     plaats van hem te bewaren (`tcp_grown`, `Close::has_grown`). "Snel
-     heeft altijd een eind."
+4. **Gegroeide capaciteit blijft tot de close, behalve onder druk.** "Krimpen
+   tussen reads of ACKs zou één bulkstroom in een cyclus van groeien,
+   alloceren en krimpen veranderen" (`tcp.rs`, veld `budgeted`).
+   - **Druk (21-11-2026):** boven 2/3 bezet groeit geen ring en geeft
+     `maintain` elke lege ring terug tot zijn vloer (`shrink_empty`); onder
+     1/2 gaat de druk eraf (`Budget::track`, Linux `tcp_mem`). Een vloer die
+     niet past onder druk krimpt eerst alles wat leeg is (`new_conn`). Een
+     ontvangstring trekt daarbij zijn venster in (KAM, afwijkingen).
+   - **Waarom:** een EasyFlor-instance op HopOS verloor na een loadtest
+     ruim 30 minuten elke uitgaande verbinding. Gegroeide ringen (tot
+     ~850 KiB) van stille keep-alive- en poolverbindingen hielden de pot
+     leeg, en een lege pot weigert alles. Een timer per verbinding is
+     bewust niet gekozen: Linux heeft er ook geen.
+   - **Lezen:** `Stack::pot` (vrij, druk, `refused_no_budget`,
+     `tcp_shrunk`) en `Stack::tcp_buffers` (`TcpBuffers::grown`, voor
+     `Close::has_grown`). De pool van leanhttp sluit een gegroeide
+     verbinding in plaats van hem te bewaren. "Snel heeft altijd een eind."
 5. **`tcp_readable`** (222aa18, 02-10): niet-verbruikend. FIN en reset
    tellen als leesbaar, voor een eigenaar die met één select op meerdere
    verbindingen wacht.
@@ -1442,7 +1453,7 @@ ronde schreef alleen dit bestand.
 | Beslismatrix, TLS/S3 MURDER | "TLS server" | `leantls::server` bestaat sinds 09df81b (v3.1.7). Gebruikers: Stulp en Spin |
 | leantls/leanhttps | Niets over clientcertificaten, P-256 voor de client en TLS 1.2 | De ongecommitte README noemt het wel; KAM is niet meegewijzigd (geen KEEP/ADAPT, geen meting, terwijl de change rule die eist) |
 | leannet KEEP | "implements `net.Conn`, `net.Listener`, `net.PacketConn`, and the Tamago socket seam"; `maxGroups`, `JoinGroup6`, `AF_INET6`, `ListenUDP6`; `Stack.Close` laat "the Device reference" los | Go. In Rust: handvatten, `MAX_GROUPS`, `join_group6`, `udp6_bind`, geen device |
-| leannet KEEP | "grow under measured pressure, **shrink unused excess while idle**" | Er wordt niet gekrompen: gegroeide capaciteit blijft tot de close (`tcp.rs`, veld `budgeted`) |
+| leannet KEEP | "grow under measured pressure, **shrink unused excess while idle**" | Sinds 21-11-2026: krimpen onder druk op de pot (`tcp_mem`), niet bij stilte; KAM is meegewijzigd |
 | Release gate | `go test`, `go test -race`, `go vet`, surfserve, `metal/net/hopswitch`, TamaGo-compiles | `tools/gate.sh`: `cargo test`, clippy, de features `ipv6` en `std`, rustfmt, de no_std-bouw |
 | leanhttp server MURDER | "request `Transfer-Encoding`, including chunked (`501`)" | Chunked wordt aangenomen sinds 222aa18; KEEP zegt dat ook. KAM spreekt zichzelf tegen (deelagent) |
 | leanhttp server/Mux KEEP | "accept errors with bounded backoff", "Registration errors panic", "Serve does not recover handler panics", `io.ErrUnexpectedEOF` | Geen listener in leanhttp; `Mux::handle` geeft `Err`; een handlerfout wordt een 500; `Error::UnexpectedEof` (deelagent) |

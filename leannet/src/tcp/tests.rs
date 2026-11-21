@@ -531,6 +531,131 @@ fn tcp_rx_grows_under_pressure() {
     assert_eq!(w2.b.rx.size(), 512, "rx ring grew without budget");
 }
 
+/// Een ontvanger met de vloermaten uit een pot met drukgrenzen: de vloer is
+/// geboekt, zoals `Stack::new_conn` doet.
+fn pressured_pair(high: usize, low: usize) -> Wire {
+    use crate::stack::{TCP_FLOOR_RING, TCP_FLOOR_RX, TCP_FLOOR_TX};
+    let mut a = TcpConn::with_rings(16 << 10, 1 << 20).unwrap();
+    let mut b = TcpConn::with_rings(TCP_FLOOR_RX, TCP_FLOOR_TX).unwrap();
+    a.open_active(1000, 1460, 0);
+    b.open_passive(5000, 1460, 0);
+    let mut pot_b = Budget::with_pressure(1 << 20, high, low);
+    assert!(pot_b.reserve(TCP_FLOOR_RING));
+    b.budgeted = true;
+    b.max_buf = 256 << 10;
+    let mut w = Wire {
+        a,
+        b,
+        pot_a: Budget::new(0),
+        pot_b,
+        now: HOUR,
+        drop_ab: None,
+        drop_ba: None,
+    };
+    w.connect();
+    w
+}
+
+/// Onder druk groeit niets meer, een ring met bytes blijft, een lege ring
+/// krimpt tot zijn vloer en trekt zijn venster in; de stroom loopt daarna
+/// heel door.
+#[test]
+fn tcp_druk_stopt_groei_en_krimpt_alleen_lege_ringen() {
+    use crate::stack::{TCP_FLOOR_RING, TCP_FLOOR_RX};
+    let mut w = pressured_pair(100 << 10, 50 << 10);
+    let payload: Vec<u8> = (0..1usize << 20)
+        .map(|i| (i * 31 + i / 977) as u8)
+        .collect();
+    let mut written = 0;
+    // Een lezer die niets leest: de ring groeit tot de druk aangaat.
+    for _ in 0..200 {
+        if written < payload.len() {
+            written += w.write_a(&payload[written..]).unwrap_or(0);
+        }
+        w.pump();
+        w.advance(10 * MS);
+    }
+    assert!(
+        w.pot_b.pressure,
+        "pot not under pressure: used {}",
+        w.pot_b.used
+    );
+    let grown = w.b.rx.size();
+    assert!(grown > TCP_FLOOR_RX, "rx never grew: {grown}");
+    assert!(
+        w.b.cnt.rx_grow_refused > 0,
+        "growth under pressure was not refused"
+    );
+    assert_eq!(
+        w.b.shrink_empty(&mut w.pot_b),
+        0,
+        "a ring holding bytes shrank"
+    );
+    assert_eq!(w.b.rx.size(), grown);
+
+    // Leeg lezen, dan krimpen: de pot krijgt alles boven de vloer terug.
+    let mut got = read_all(&mut w.b);
+    assert_eq!(w.b.shrink_empty(&mut w.pot_b), 1);
+    assert_eq!(w.b.rx.size(), TCP_FLOOR_RX);
+    assert_eq!(
+        w.pot_b.used, TCP_FLOOR_RING,
+        "pot not refunded to the floor"
+    );
+    assert!(!w.pot_b.pressure, "pressure stayed on below the low mark");
+    // De volgende ACK meldt het kleinere venster.
+    let ack = w.drain_b();
+    assert!(
+        ack.iter()
+            .any(|(seg, _)| usize::from(seg.wnd) <= TCP_FLOOR_RX),
+        "no window update after shrinking: {ack:?}"
+    );
+    for (seg, data) in ack {
+        w.recv_a(&seg, &data);
+    }
+
+    // De rest van de stroom komt heel en in volgorde aan.
+    for _ in 0..2000 {
+        if got.len() >= payload.len() {
+            break;
+        }
+        if written < payload.len() {
+            written += w.write_a(&payload[written..]).unwrap_or(0);
+        }
+        w.pump();
+        got.extend(read_all(&mut w.b));
+        w.advance(10 * MS);
+    }
+    assert_eq!(got.len(), payload.len(), "transfer incomplete after shrink");
+    assert!(got == payload, "stream corrupted across the shrink");
+}
+
+/// Zonder druk krimpt niets, ook niet een lege gegroeide ring.
+#[test]
+fn tcp_zonder_druk_krimpt_niets() {
+    use crate::stack::TCP_FLOOR_RX;
+    let mut w = pressured_pair(1 << 20, 1 << 20);
+    let payload = vec![7u8; 400 << 10];
+    let mut written = 0;
+    let mut got = 0;
+    for _ in 0..400 {
+        if written < payload.len() {
+            written += w.write_a(&payload[written..]).unwrap_or(0);
+        }
+        w.pump();
+        got += read_all(&mut w.b).len();
+        assert_eq!(w.b.shrink_empty(&mut w.pot_b), 0, "shrank without pressure");
+        if got == payload.len() {
+            break;
+        }
+    }
+    assert_eq!(got, payload.len());
+    assert!(
+        w.b.rx.size() > TCP_FLOOR_RX,
+        "rx never grew: {}",
+        w.b.rx.size()
+    );
+}
+
 #[test]
 fn tcp_rx_grows_on_full_segments() {
     // De ijzerconditie van 18-08-2026 (LicheeRV): een SNELLE lezer draint de

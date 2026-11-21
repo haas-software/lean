@@ -2309,3 +2309,195 @@ fn tcp_buffers_meldt_de_ringmaten() {
     net.a.tcp_close(c, now).unwrap();
     assert_eq!(net.a.tcp_buffers(c), Err(Error::Closed));
 }
+
+// ---- de pot onder druk en de reserve voor uitgaand (21-11-2026) ----
+//
+// Na een loadtest verloor een EasyFlor-instance op HopOS ruim 30 minuten elke
+// uitgaande verbinding: gegroeide ringen van stille keep-alive- en
+// poolverbindingen hielden de pot leeg, en een lege pot weigert alles.
+
+/// Leest alles wat er op `h` ligt en geeft het aantal bytes.
+fn drain_reads(s: &mut Stack, h: TcpHandle) -> usize {
+    let mut buf = vec![0u8; 64 << 10];
+    let mut n = 0;
+    while let Ok(k) = s.tcp_read(h, &mut buf) {
+        if k == 0 {
+            break;
+        }
+        n += k;
+    }
+    n
+}
+
+/// Twee verbindingen die groeiden en stil werden; de pot staat dan nog niet
+/// onder druk. Geeft client- en serverhandvatten.
+fn grown_idle_pair(net: &mut Net, port: u16) -> Vec<(TcpHandle, TcpHandle)> {
+    let l = net.b().tcp_listen(port).unwrap();
+    let mut out = Vec::new();
+    for _ in 0..2 {
+        let c = dial(net, IP_B, port, 5 * SEC).unwrap();
+        let s = accept(net, sb, l);
+        let payload = vec![0x5au8; 256 << 10];
+        write_all(net, sb, s, &payload, 10 * SEC);
+        read_exact(net, sa, c, payload.len(), 10 * SEC);
+        assert!(
+            net.a.tcp_buffers(c).unwrap().grown(),
+            "client rx never grew"
+        );
+        out.push((c, s));
+    }
+    out
+}
+
+/// Een vloed aan nieuwe verbindingen tegen een pot met gegroeide stille
+/// verbindingen: zodra de vloer niet meer past, krimpen de lege ringen en
+/// krijgt de nieuwe verbinding haar plek. Daarna loopt de oude stroom door.
+#[test]
+fn druk_krimpt_stille_ringen_en_de_dial_lukt() {
+    const BUDGET: usize = 512 << 10;
+    let mut net = Net::pair(BUDGET, 4 << 20);
+    let pairs = grown_idle_pair(&mut net, 95);
+    let before = net.a.pot();
+    assert!(!before.pressure, "pressure before the flood: {before:?}");
+    // Zonder krimpen pasten er (512 KiB − gebruik) / 20 KiB dials bij.
+    let without_shrink = (BUDGET - before.used) / TCP_FLOOR_RING;
+
+    let now = net.now;
+    let mut dials = 0;
+    let refusal = loop {
+        match net.a.tcp_connect(IP_B, 95, now + 5 * SEC, now) {
+            Ok(_) => dials += 1,
+            Err(e) => break e,
+        }
+        assert!(dials < 64, "the pot never ran out");
+    };
+    assert!(matches!(refusal, Error::NoBudget { .. }), "{refusal}");
+    let pot = net.a.pot();
+    assert!(
+        dials >= BUDGET / TCP_FLOOR_RING - 3 && dials > without_shrink,
+        "{dials} dials (without shrinking {without_shrink}): {pot:?}"
+    );
+    assert!(pot.tcp_shrunk >= 2, "no ring shrank: {pot:?}");
+    for (c, _) in &pairs {
+        assert!(
+            !net.a.tcp_buffers(*c).unwrap().grown(),
+            "a grown idle ring survived"
+        );
+    }
+
+    // De ingetrokken vensters breken de oude stroom niet.
+    let (c, s) = pairs[0];
+    let payload: Vec<u8> = (0..100 << 10).map(|i| (i * 7 + i / 251) as u8).collect();
+    let mut off = 0;
+    let mut got = Vec::new();
+    let ok = net.run_until(20 * SEC, |n| {
+        if let Ok(k) = n.b().tcp_write(s, &payload[off..]) {
+            off += k;
+        }
+        let mut buf = vec![0u8; 32 << 10];
+        while let Ok(k) = n.a.tcp_read(c, &mut buf) {
+            if k == 0 {
+                break;
+            }
+            got.extend_from_slice(&buf[..k]);
+        }
+        got.len() == payload.len()
+    });
+    assert!(
+        ok && got == payload,
+        "stream broke after the shrink: {} bytes",
+        got.len()
+    );
+}
+
+/// De pomp brengt een pot onder druk in één ronde terug zodra de ringen
+/// leeg zijn, en onder druk groeit geen ring meer. Daarna lukt een dial
+/// gewoon: herstel zonder herstart.
+#[test]
+fn druk_eraf_in_een_pompronde() {
+    const BUDGET: usize = 512 << 10;
+    let mut net = Net::pair(BUDGET, 4 << 20);
+    let l = net.b().tcp_listen(96).unwrap();
+    let mut conns = Vec::new();
+    for _ in 0..3 {
+        let c = dial(&mut net, IP_B, 96, 5 * SEC).unwrap();
+        let s = accept(&mut net, sb, l);
+        conns.push((c, s));
+    }
+    // Een lezer die niets leest: de ringen groeien tot de druk aangaat.
+    let payload = vec![1u8; 120 << 10];
+    let mut sent = [0usize; 3];
+    net.run_until(5 * SEC, |n| {
+        for (i, (_, s)) in conns.iter().enumerate() {
+            if let Ok(k) = n.b().tcp_write(*s, &payload[sent[i]..]) {
+                sent[i] += k;
+            }
+        }
+        false
+    });
+    let pot = net.a.pot();
+    assert!(pot.pressure && pot.pressure_entered == 1, "{pot:?}");
+    let max_rx = conns
+        .iter()
+        .map(|(c, _)| net.a.tcp_buffers(*c).unwrap().rx)
+        .max()
+        .unwrap();
+    // Nog even zenden: onder druk groeit niets meer.
+    net.run_for(SEC);
+    for (c, _) in &conns {
+        assert!(
+            net.a.tcp_buffers(*c).unwrap().rx <= max_rx,
+            "a ring grew under pressure"
+        );
+    }
+
+    // Alles lezen, tot de laatste byte, dan één pompronde.
+    let mut got = [0usize; 3];
+    let ok = net.run_until(30 * SEC, |n| {
+        for (i, (c, s)) in conns.iter().enumerate() {
+            if let Ok(k) = n.b().tcp_write(*s, &payload[sent[i]..]) {
+                sent[i] += k;
+            }
+            got[i] += drain_reads(&mut n.a, *c);
+        }
+        got.iter().all(|g| *g == payload.len())
+    });
+    assert!(ok, "reads stalled at {got:?}");
+    net.settle();
+    let pot = net.a.pot();
+    assert!(
+        !pot.pressure && pot.used < BUDGET / 2,
+        "pot still pressured after the rings emptied: {pot:?}"
+    );
+    dial(&mut net, IP_B, 96, 5 * SEC).expect("dial after the pot recovered");
+}
+
+/// Eén bulkstroom zonder concurrentie om de pot: de ringen groeien en niets
+/// krimpt of komt onder druk, ook niet tussen twee reads.
+#[test]
+fn bulkstroom_zonder_druk_krimpt_niet() {
+    let mut net = Net::pair(1 << 20, 1 << 20);
+    let (c, s, _) = connected(&mut net, 99);
+    let chunk = vec![3u8; 64 << 10];
+    let total = 8usize << 20;
+    let mut sent = 0;
+    let mut got = 0;
+    let mut peak = 0;
+    let ok = net.run_until(60 * SEC, |n| {
+        if sent < total
+            && let Ok(k) = n.a.tcp_write(c, &chunk[..chunk.len().min(total - sent)])
+        {
+            sent += k;
+        }
+        got += drain_reads(n.b(), s);
+        let rx = n.b().tcp_buffers(s).unwrap().rx;
+        assert!(rx >= peak, "server rx shrank mid-stream: {rx} after {peak}");
+        peak = rx;
+        got == total
+    });
+    assert!(ok, "bulk stalled at {got} of {total}");
+    assert!(peak > TCP_FLOOR_RX, "rx never grew");
+    for pot in [net.a.pot(), net.b().pot()] {
+        assert!(pot.pressure_entered == 0 && pot.tcp_shrunk == 0, "{pot:?}");
+    }
+}

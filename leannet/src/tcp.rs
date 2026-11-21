@@ -22,6 +22,7 @@
 use core::fmt;
 
 use crate::ring::{Budget, Ring, TxRing};
+use crate::stack::{TCP_FLOOR_RX, TCP_FLOOR_TX};
 use crate::wire::TcpFlags;
 use crate::{Error, MS, Result, SEC};
 
@@ -249,9 +250,11 @@ pub(crate) struct TcpConn {
 
     /// Ringen beginnen op hun vloer en verdubbelen onder ontvangst- of
     /// schrijfdruk, begrensd door `max_buf` en de pot. Zonder koppeling aan
-    /// de pot groeit niets. Gegroeide capaciteit leeft tot de close: krimpen
-    /// tussen reads of ACKs zou één bulkstroom in een cyclus van groeien,
-    /// alloceren en krimpen veranderen.
+    /// de pot groeit niets. Gegroeide capaciteit leeft tot de close, behalve
+    /// onder druk op de pot (`shrink_empty`): krimpen tussen reads of ACKs
+    /// zonder druk zou één bulkstroom in een cyclus van groeien, alloceren en
+    /// krimpen veranderen, en dat kost doorvoer zonder dat iemand het geheugen
+    /// nodig had.
     pub(crate) budgeted: bool,
     pub(crate) max_buf: usize,
 
@@ -466,15 +469,21 @@ impl TcpConn {
     }
 
     /// Verdubbelt de ontvangstring binnen `max_buf` en de pot.
+    ///
+    /// Onder druk groeit niets (Linux matigt dan zijn buffers net zo): de
+    /// ruimte die de pomp terugwint, is voor de vloer van nieuwe verbindingen.
     pub(crate) fn grow_rx(&mut self, pot: &mut Budget) -> bool {
         let old = self.rx.size();
         let Some(new) = self.grown_size(old) else {
             return false;
         };
+        if pot.pressure {
+            return false;
+        }
         // De piek (oud plus nieuw) wordt geboekt: eerst de hele nieuwe buffer
         // reserveren, dan pas de oude teruggeven. Kan de pot de piek niet
         // dragen, dan blijft de ring gewoon klein.
-        if !pot.reserve(new) {
+        if !pot.reserve_peak(new) {
             return false;
         }
         if self.rx.grow(new).is_err() {
@@ -485,13 +494,17 @@ impl TcpConn {
         true
     }
 
-    /// Verdubbelt de zendring binnen `max_buf` en de pot.
+    /// Verdubbelt de zendring binnen `max_buf` en de pot; dezelfde regels als
+    /// `grow_rx`.
     pub(crate) fn grow_tx(&mut self, pot: &mut Budget) -> bool {
         let old = self.tx.size();
         let Some(new) = self.grown_size(old) else {
             return false;
         };
-        if !pot.reserve(new) {
+        if pot.pressure {
+            return false;
+        }
+        if !pot.reserve_peak(new) {
             return false;
         }
         if self.tx.grow(new).is_err() {
@@ -500,6 +513,55 @@ impl TcpConn {
         }
         pot.release(old);
         true
+    }
+
+    /// Onder druk: geeft elke lege, gegroeide ring terug tot zijn vloer en
+    /// meldt hoeveel ringen kromp. Zonder druk doet hij niets, ook niet met
+    /// de zendring als de pot na de ontvangstring al uit de druk raakte. Een
+    /// ring met bytes erin blijft staan; de pomp probeert het de volgende
+    /// ronde opnieuw (elke read en elke ACK die een ring leegt, wekt haar).
+    ///
+    /// Een lege zendring krimpt zonder gevolgen op de draad. Een lege
+    /// ontvangstring had een groter venster beloofd: die belofte wordt
+    /// ingetrokken (`adv_set` uit) en één ACK meldt de peer het kleinere
+    /// venster. Dat is het "kort vastlopen" onder een vloed: wat de peer nog
+    /// in het oude venster stuurt, past maar deels en komt via zijn
+    /// hertransmissie. Na één RTO stilte herstart een zender toch op zijn
+    /// beginvenster (RFC 5681 §4.1), en tien segmenten passen in de vloer.
+    ///
+    /// Een nieuwe vloerbuffer is een faalbare allocatie: weigert de heap, dan
+    /// blijft de ring zoals hij was.
+    pub(crate) fn shrink_empty(&mut self, pot: &mut Budget) -> usize {
+        if !self.budgeted || !pot.pressure {
+            return 0;
+        }
+        let mut n = 0;
+        let rx = self.rx.size();
+        if rx > TCP_FLOOR_RX
+            && self.rx.buffered() == 0
+            && let Ok(floor) = Ring::with_size(TCP_FLOOR_RX)
+        {
+            self.rx = floor;
+            pot.release(rx - TCP_FLOOR_RX);
+            if !self.fin_rcvd {
+                // De volgende advertentie legt de rand opnieuw vast op wat
+                // de vloer draagt; tot dan geldt de vrije ruimte.
+                self.adv_set = false;
+                self.need_ack = true;
+            }
+            n += 1;
+        }
+        let tx = self.tx.size();
+        if pot.pressure
+            && tx > TCP_FLOOR_TX
+            && self.tx.buffered() == 0
+            && let Ok(floor) = TxRing::with_size(TCP_FLOOR_TX)
+        {
+            self.tx = floor;
+            pot.release(tx - TCP_FLOOR_TX);
+            n += 1;
+        }
+        n
     }
 
     /// Geeft ontvangen bytes. `Ok(0)` is "nog niets"; [`Error::TcpClosed`] is
