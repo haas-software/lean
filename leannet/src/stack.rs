@@ -104,10 +104,46 @@ pub struct Config {
     pub link_trusted: bool,
 }
 
+/// De ringmaten van één verbinding, voor een eigenaar die wil weten of ze
+/// groeide (een pool die een gegroeide verbinding niet bewaart).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TcpBuffers {
+    /// De capaciteit van de ontvangstring in bytes; nul na `tcp_close`.
+    pub rx: usize,
+    /// De capaciteit van de zendring in bytes; nul nadat de FIN bevestigd is.
+    pub tx: usize,
+}
+
+impl TcpBuffers {
+    /// De vloer van een ontvangstring: elke verbinding begint hier.
+    pub const RX_FLOOR: usize = TCP_FLOOR_RX;
+    /// De vloer van een zendring.
+    pub const TX_FLOOR: usize = TCP_FLOOR_TX;
+
+    /// Of een van beide ringen boven zijn vloer staat.
+    pub fn grown(&self) -> bool {
+        self.rx > Self::RX_FLOOR || self.tx > Self::TX_FLOOR
+    }
+}
+
+/// Een momentopname van de pot, in O(1): wat er vrij is en de weigeringen.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PotStats {
+    /// [`Config::budget`].
+    pub total: usize,
+    /// Bezette bytes.
+    pub used: usize,
+    /// Vrije bytes.
+    pub free: usize,
+    /// [`Stats::refused_no_budget`].
+    pub refused_no_budget: usize,
+}
+
 /// Een momentopname van de tellers voor logging en telemetrie.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Stats {
-    /// Verbindingen geweigerd omdat het budget op was.
+    /// Inkomende verbindingen geweigerd (met een RST) omdat het budget op
+    /// was. Een dial krijgt dan [`Error::NoBudget`].
     pub refused_no_budget: usize,
     /// Frames korter dan een Ethernet-header.
     pub drop_short_frame: usize,
@@ -460,6 +496,17 @@ impl Stack {
     /// Vrije bytes in de pot.
     pub fn budget_free(&self) -> usize {
         self.pot.free()
+    }
+
+    /// De pot: vrije bytes en de weigeringen. Goedkoop (geen rondgang langs
+    /// de verbindingen), dus ook per verzoek te lezen.
+    pub fn pot(&self) -> PotStats {
+        PotStats {
+            total: self.pot.total,
+            used: self.pot.used,
+            free: self.pot.free(),
+            refused_no_budget: self.stats.refused_no_budget,
+        }
     }
 
     /// Registreert de taak die de stack pompt. Hij wordt gewekt zodra er

@@ -136,6 +136,10 @@
 //! luid (een fout of een RST), nooit met een stille wacht of een abort.
 //! Allocatie is overal faalbaar; na opbouw en groei alloceert het hete pad niet.
 //!
+//! [`Stack::pot`] leest de pot in O(1) (vrij, weigeringen);
+//! [`Stack::tcp_buffers`] geeft de ringmaten van één verbinding, met
+//! [`TcpBuffers::grown`] voor een pool die gegroeide verbindingen niet bewaart.
+//!
 //! De vorige stack alloceerde naar configuratie in plaats van gebruik: 2 MiB
 //! per listener vooraf en 256 KiB per dial. Op een 64 MiB HopOS-doel gaf dat
 //! reproduceerbaar een OOM na 151 seconden downloadlast.
@@ -189,7 +193,7 @@ pub use error::{Error, Result};
 #[cfg(feature = "ipv6")]
 pub use ipv6::{Endpoint6, NdpStats, Udp6Handle};
 pub use socket::{Endpoint, UDP_MAX_PAYLOAD};
-pub use stack::{Config, ListenHandle, Stack, Stats, TcpHandle, UdpHandle};
+pub use stack::{Config, ListenHandle, PotStats, Stack, Stats, TcpBuffers, TcpHandle, UdpHandle};
 pub use tcp::TcpState;
 
 /// Eén milliseconde in nanoseconden.

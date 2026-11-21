@@ -19,7 +19,9 @@
 use core::task::Waker;
 
 use crate::multicast::{is_link_local_multicast, is_multicast_ip};
-use crate::stack::{ConnKey, Dial, ListenHandle, Listener, MTU, TCP_BACKLOG, TcpHandle, UdpHandle};
+use crate::stack::{
+    ConnKey, Dial, ListenHandle, Listener, MTU, TCP_BACKLOG, TcpBuffers, TcpHandle, UdpHandle,
+};
 use crate::tcp::TcpState;
 use crate::wire::{SIZE_IPV4, SIZE_UDP};
 use crate::{Error, Result, Stack};
@@ -378,6 +380,19 @@ impl Stack {
         self.release_handle(h);
         self.notify(); // Stuur de FIN.
         Ok(())
+    }
+
+    /// De ringmaten van de verbinding, en via [`TcpBuffers::grown`] of ze
+    /// boven hun vloer staan. Goedkoop: twee getallen, geen rondgang.
+    pub fn tcp_buffers(&self, h: TcpHandle) -> Result<TcpBuffers> {
+        let c = self
+            .conn(h.idx)
+            .filter(|c| c.generation == h.generation && c.app_owned)
+            .ok_or(Error::Closed)?;
+        Ok(TcpBuffers {
+            rx: c.tcp.rx.size(),
+            tx: c.tcp.tx.size(),
+        })
     }
 
     /// De toestand van de verbinding.

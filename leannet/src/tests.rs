@@ -2287,3 +2287,25 @@ fn twijfel_vraagt_zonder_de_mac_los_te_laten() {
     net.a.probe_neighbor([10, 0, 0, 77], now + SEC);
     assert!(fwd_asked(&mut net).is_empty());
 }
+
+/// De leesfunctie: een verse verbinding staat op haar vloer, een bulkstroom
+/// laat de ontvangstring groeien, na `tcp_close` is het handvat weg.
+#[test]
+fn tcp_buffers_meldt_de_ringmaten() {
+    let mut net = Net::pair(1 << 20, 1 << 20);
+    let (c, s, _) = connected(&mut net, 94);
+    let fresh = net.a.tcp_buffers(c).unwrap();
+    assert_eq!((fresh.rx, fresh.tx), (TCP_FLOOR_RX, TCP_FLOOR_TX));
+    assert!(!fresh.grown());
+    let payload = vec![0x5au8; 256 << 10];
+    write_all(&mut net, sb, s, &payload, 10 * SEC);
+    read_exact(&mut net, sa, c, payload.len(), 10 * SEC);
+    let grown = net.a.tcp_buffers(c).unwrap();
+    assert!(grown.grown() && grown.rx > TCP_FLOOR_RX, "{grown:?}");
+    let pot = net.a.pot();
+    assert_eq!(pot.used + pot.free, pot.total);
+    assert_eq!(pot.used, grown.rx + grown.tx);
+    let now = net.now;
+    net.a.tcp_close(c, now).unwrap();
+    assert_eq!(net.a.tcp_buffers(c), Err(Error::Closed));
+}
