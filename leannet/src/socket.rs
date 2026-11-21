@@ -185,6 +185,42 @@ impl Stack {
         deadline: u64,
         now: u64,
     ) -> Result<TcpHandle> {
+        self.connect(ip, port, deadline, now, false)
+    }
+
+    /// Als [`Stack::tcp_connect`], maar voor een verbinding die er moet
+    /// komen (een leasevernieuwing, een hartslag): past de vloer niet, ook
+    /// niet nadat de lege ringen onder druk krompen, dan breekt de stack één
+    /// inkomende verbinding af met een RST en dialt in haar ruimte. Het
+    /// slachtoffer is de grootste inkomende verbinding met lege ringen,
+    /// anders de grootste inkomende. Een dial, gewoon of geforceerd, wordt
+    /// nooit opgeofferd. Is er geen inkomende verbinding, dan faalt hij als
+    /// `tcp_connect`: [`Error::NoBudget`]. Elk slachtoffer telt in
+    /// [`crate::Stats::forced_evictions`]; zijn handvat geeft daarna
+    /// [`Error::Reset`].
+    ///
+    /// Bedoeld voor de paar verbindingen zonder welke de app niet verder
+    /// kan, niet als gewone dial: wie hem overal gebruikt, laat een vloed
+    /// van zijn eigen dials zijn bezoekers weggooien.
+    pub fn tcp_connect_forced(
+        &mut self,
+        ip: [u8; 4],
+        port: u16,
+        deadline: u64,
+        now: u64,
+    ) -> Result<TcpHandle> {
+        self.connect(ip, port, deadline, now, true)
+    }
+
+    /// De dial achter beide.
+    fn connect(
+        &mut self,
+        ip: [u8; 4],
+        port: u16,
+        deadline: u64,
+        now: u64,
+        forced: bool,
+    ) -> Result<TcpHandle> {
         // TCP naar multicast is betekenisloos: ingress laat multicast-TCP per
         // contract vallen, dus een SYN zou alleen draad en ~20 KiB verbrand
         // tot de handshake opgeeft. Weiger voordat er iets bestaat.
@@ -206,7 +242,11 @@ impl Stack {
             rip: ip,
             rport: port,
         };
-        let i = self.new_conn(key)?;
+        let i = if forced {
+            self.new_conn_forced(key)?
+        } else {
+            self.new_conn(key)?
+        };
         let iss = self.iss(key, now);
         let adv_mss = self.adv_mss(ip);
         let adv_ws = self.cfg.adv_ws;

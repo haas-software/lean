@@ -2501,3 +2501,125 @@ fn bulkstroom_zonder_druk_krimpt_niet() {
         assert!(pot.pressure_entered == 0 && pot.tcp_shrunk == 0, "{pot:?}");
     }
 }
+
+/// b dialt naar a tot a weigert; geeft de gelukte handvatten op b.
+fn flood_into_a(net: &mut Net, port: u16) -> Vec<TcpHandle> {
+    let mut ok = Vec::new();
+    for _ in 0..32 {
+        let now = net.now;
+        let h = net.b().tcp_connect(IP_A, port, now + 5 * SEC, now).unwrap();
+        let mut out = Err(Error::WouldBlock);
+        net.run_until(6 * SEC, |n| {
+            let now = n.now;
+            out = n.b().tcp_poll_connect(h, now);
+            out != Err(Error::WouldBlock)
+        });
+        match out {
+            Ok(()) => ok.push(h),
+            Err(Error::Refused { .. }) => return ok,
+            Err(e) => panic!("flood dial: {e}"),
+        }
+    }
+    panic!("a never refused");
+}
+
+/// Een pot vol inkomende verbindingen: een gewone dial faalt, een
+/// geforceerde breekt één lege inkomende af en lukt. Een inkomende
+/// verbinding met ongelezen bytes is niet de eerste keus.
+#[test]
+fn geforceerde_dial_offert_een_inkomende_verbinding_op() {
+    let mut net = Net::pair(10 * TCP_FLOOR_RING, 4 << 20);
+    let l = net.a.tcp_listen(93).unwrap();
+    let _lb = net.b().tcp_listen(92).unwrap();
+    let flood = flood_into_a(&mut net, 93);
+    assert_eq!(flood.len(), 10, "inbound did not fill the pot");
+    // Eén inkomende verbinding heeft ongelezen bytes voor de app.
+    let busy = accept(&mut net, sa, l);
+    let peer = flood
+        .iter()
+        .copied()
+        .find(|h| {
+            let local = net.a.tcp_local(busy).unwrap().port;
+            net.b().tcp_remote(*h).unwrap().port == local
+        })
+        .unwrap();
+    write_all(&mut net, sb, peer, b"wacht op mij", 5 * SEC);
+    net.settle();
+    assert!(net.a.tcp_readable(busy).unwrap());
+
+    let now = net.now;
+    assert!(
+        matches!(
+            net.a.tcp_connect(IP_B, 92, now + 5 * SEC, now),
+            Err(Error::NoBudget { .. })
+        ),
+        "a normal dial got room"
+    );
+    let h = net
+        .a
+        .tcp_connect_forced(IP_B, 92, now + 5 * SEC, now)
+        .unwrap();
+    let mut out = Err(Error::WouldBlock);
+    net.run_until(6 * SEC, |n| {
+        let now = n.now;
+        out = n.a.tcp_poll_connect(h, now);
+        out != Err(Error::WouldBlock)
+    });
+    out.expect("forced dial did not connect");
+    write_all(&mut net, sa, h, b"lease", 5 * SEC);
+    assert_eq!(net.a.pot().forced_evictions, 1);
+    assert!(
+        net.a.tcp_readable(busy).unwrap(),
+        "the busy connection was evicted"
+    );
+    assert_eq!(read_exact(&mut net, sa, busy, 12, 5 * SEC), b"wacht op mij");
+    // Een tweede geforceerde dial offert weer een inkomende op, niet de eerste.
+    let now = net.now;
+    let h2 = net
+        .a
+        .tcp_connect_forced(IP_B, 92, now + 5 * SEC, now)
+        .unwrap();
+    let mut out = Err(Error::WouldBlock);
+    net.run_until(6 * SEC, |n| {
+        let now = n.now;
+        out = n.a.tcp_poll_connect(h2, now);
+        out != Err(Error::WouldBlock)
+    });
+    out.expect("second forced dial did not connect");
+    write_all(&mut net, sa, h, b"nog", 5 * SEC);
+    assert_eq!(net.a.pot().forced_evictions, 2);
+    // Precies twee peers op b zagen de RST.
+    net.run_for(SEC);
+    let reset = flood
+        .iter()
+        .filter(|h| net.b().tcp_write(**h, b"x") == Err(Error::Reset))
+        .count();
+    assert_eq!(reset, 2, "expected exactly two evicted peers");
+}
+
+/// Zonder inkomende verbinding offert een geforceerde dial niets op: hij
+/// faalt als een gewone, en de bestaande dials blijven staan.
+#[test]
+fn geforceerde_dial_zonder_inkomend_faalt_netjes() {
+    let mut net = Net::pair(5 * TCP_FLOOR_RING, 4 << 20);
+    let _lb = net.b().tcp_listen(91).unwrap();
+    let mut dials = Vec::new();
+    loop {
+        let now = net.now;
+        match net.a.tcp_connect(IP_B, 91, now + 5 * SEC, now) {
+            Ok(h) => dials.push(h),
+            Err(Error::NoBudget { .. }) => break,
+            Err(e) => panic!("dial: {e}"),
+        }
+    }
+    assert_eq!(dials.len(), 5);
+    let forced = net
+        .a
+        .tcp_connect_forced(IP_B, 91, net.now + 5 * SEC, net.now);
+    assert!(matches!(forced, Err(Error::NoBudget { .. })), "{forced:?}");
+    net.settle();
+    for h in &dials {
+        assert_eq!(net.a.tcp_poll_connect(*h, net.now), Ok(()));
+    }
+    assert_eq!(net.a.pot().forced_evictions, 0);
+}

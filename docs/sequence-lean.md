@@ -541,6 +541,11 @@ Elke fout ruimt op (`abort_and_reap`, `release_handle`).
      ~850 KiB) van stille keep-alive- en poolverbindingen hielden de pot
      leeg, en een lege pot weigert alles. Een timer per verbinding is
      bewust niet gekozen: Linux heeft er ook geen.
+   - **Geforceerd (21-11-2026):** `tcp_connect_forced` (`new_conn_forced`)
+     breekt, als de vloer ook na het krimpen niet past, één inkomende
+     verbinding af: de grootste met lege ringen, anders de grootste
+     (`eviction_victim`, veld `Conn::inbound`). Nooit een dial. Teller
+     `forced_evictions`. Voor de leasevernieuwing en hartslag van een app.
    - **Lezen:** `Stack::pot` (vrij, druk, `refused_no_budget`,
      `tcp_shrunk`) en `Stack::tcp_buffers` (`TcpBuffers::grown`, voor
      `Close::has_grown`). De pool van leanhttp sluit een gegroeide

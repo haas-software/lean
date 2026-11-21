@@ -147,6 +147,12 @@
 //! gegroeide ringen van stille keep-alive-verbindingen de pot vasthielden).
 //! Zonder druk verandert er niets: een bulkstroom houdt zijn ringen.
 //!
+//! Een verbinding die er moet komen (een leasevernieuwing, een hartslag)
+//! dialt met [`Stack::tcp_connect_forced`]: past ze ook na het krimpen niet,
+//! dan breekt de stack één inkomende verbinding af (de grootste met lege
+//! ringen, anders de grootste) en dialt in haar ruimte. Een dial wordt nooit
+//! opgeofferd; zonder inkomende verbinding faalt hij als een gewone dial.
+//!
 //! [`Stack::pot`] leest de pot in O(1) (vrij, druk, weigeringen);
 //! [`Stack::tcp_buffers`] geeft de ringmaten van één verbinding, met
 //! [`TcpBuffers::grown`] voor een pool die gegroeide verbindingen niet bewaart.

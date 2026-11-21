@@ -188,6 +188,11 @@ The transport core MUST:
   once. Without pressure grown capacity lives until close, so a bulk stream
   keeps its rings. A flood may refuse everything for a while; once it stops
   and the rings drain, the pot recovers without a restart or watchdog;
+- offer `tcp_connect_forced` for the few connections an application cannot
+  do without: if the floor does not fit even after shrinking, it aborts (RST)
+  one inbound connection, the largest with empty rings, else the largest,
+  and dials in its room; a dial, forced or not, is never the victim, and
+  without an inbound connection it fails like `tcp_connect`;
 - account SYN, data, and FIN in one sequence space and retransmit after loss
   (go-back-N);
 - validate cumulative ACKs against bytes actually sent, including during a

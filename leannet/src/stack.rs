@@ -156,6 +156,8 @@ pub struct PotStats {
     pub refused_no_budget: usize,
     /// [`Stats::tcp_shrunk`].
     pub tcp_shrunk: usize,
+    /// [`Stats::forced_evictions`].
+    pub forced_evictions: usize,
 }
 
 /// Een momentopname van de tellers voor logging en telemetrie.
@@ -166,6 +168,9 @@ pub struct Stats {
     pub refused_no_budget: usize,
     /// Ringen die onder druk terug naar hun vloer krompen.
     pub tcp_shrunk: usize,
+    /// Inkomende verbindingen die een geforceerde dial afbrak
+    /// ([`Stack::tcp_connect_forced`]).
+    pub forced_evictions: usize,
     /// Frames korter dan een Ethernet-header.
     pub drop_short_frame: usize,
     /// Datagrammen zonder gebonden poort of met een volle rij.
@@ -248,6 +253,10 @@ pub(crate) struct Conn {
     pub(crate) tcp: TcpConn,
     /// Gezet op embryo's en gewist door `accept`.
     pub(crate) listener: Option<ListenHandle>,
+    /// Een peer opende deze verbinding (een SYN naar een listener). Alleen
+    /// zo'n verbinding mag [`Stack::tcp_connect_forced`] opofferen; een dial,
+    /// gewoon of geforceerd, nooit.
+    pub(crate) inbound: bool,
     /// Begrenst een gevestigde verbinding zolang ze voor `accept` in de rij
     /// staat en geen applicatie-eigenaar heeft. Absoluut; peerverkeer vernieuwt
     /// hem nooit; `accept` wist hem. Nul is "geen".
@@ -533,6 +542,7 @@ impl Stack {
             pressure_entered: self.pot.pressure_entered,
             refused_no_budget: self.stats.refused_no_budget,
             tcp_shrunk: self.stats.tcp_shrunk,
+            forced_evictions: self.stats.forced_evictions,
         }
     }
 
@@ -547,6 +557,42 @@ impl Stack {
             && c.live
         {
             self.stats.tcp_shrunk += c.tcp.shrink_empty(&mut self.pot);
+        }
+    }
+
+    /// De inkomende verbinding die een geforceerde dial opoffert: eerst de
+    /// grootste met lege ringen (er staat niets voor de app of de peer
+    /// klaar), anders de grootste. Grootte is de capaciteit van beide
+    /// ringen samen: één slachtoffer geeft zo het meeste terug. Een dial is
+    /// nooit een kandidaat.
+    fn eviction_victim(&self) -> Option<usize> {
+        self.conns
+            .iter()
+            .enumerate()
+            .filter_map(|(i, c)| c.as_ref().map(|c| (i, c)))
+            .filter(|(_, c)| c.live && c.inbound)
+            .max_by_key(|(_, c)| {
+                let empty = c.tcp.rx.buffered() == 0 && c.tcp.tx.buffered() == 0;
+                (empty, c.tcp.rx.size() + c.tcp.tx.size())
+            })
+            .map(|(i, _)| i)
+    }
+
+    /// Maakt een verbinding voor een geforceerde dial: past de vloer niet,
+    /// ook niet na het krimpen, dan breekt de stack inkomende verbindingen
+    /// af (RST) tot hij past of er geen meer is.
+    pub(crate) fn new_conn_forced(&mut self, key: ConnKey) -> Result<usize> {
+        loop {
+            match self.new_conn(key) {
+                Err(Error::NoBudget { need, free }) => {
+                    let Some(v) = self.eviction_victim() else {
+                        return Err(Error::NoBudget { need, free });
+                    };
+                    self.abort_and_reap(v);
+                    self.stats.forced_evictions += 1;
+                }
+                other => return other,
+            }
         }
     }
 
@@ -960,6 +1006,7 @@ impl Stack {
             // `emit` stuurt een wachtende reset eerst; reap bewaart hem als de
             // verbinding sterft.
             c.listener = Some(lh);
+            c.inbound = true;
         }
         self.notify();
     }
@@ -1150,6 +1197,7 @@ impl Stack {
             key,
             tcp,
             listener: None,
+            inbound: false,
             handoff_deadline: 0,
             live: true,
             app_owned: false,
